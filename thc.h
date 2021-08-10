@@ -25,9 +25,9 @@
 #define _THC_H_
 
 typedef enum {
-    Plasma_mode0 = 0,
-    Plasma_mode1,
-    Plasma_mode2
+    Plasma_ModeOff = 0,
+    Plasma_ModeUpDown,
+    Plasma_ModeVoltage
 } plasma_mode_t;
 
 typedef struct {
