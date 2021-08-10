@@ -1,6 +1,6 @@
 ## Plasma/THC
 
-Under development. Based on [LinuxCNC specification](http://linuxcnc.org/docs/devel/html/plasma/plasmac-user-guide.html#config-panel), with limitations.
+Under development. Based on [LinuxCNC specification](http://linuxcnc.org/docs/2.8/html/plasma/plasmac-user-guide.html#config-panel), with limitations.
 
 #### $350 - Mode of operation
 
@@ -63,4 +63,4 @@ Driver must support a number of [ioports ports](../../templates/ioports.c).
 LinuxCNC documentation linked to above.
 
 ---
-2020-10-21
+2021-08-10

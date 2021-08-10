@@ -381,7 +381,7 @@ static const setting_group_detail_t plasma_groups [] = {
 };
 
 static const setting_detail_t plasma_settings[] = {
-    { Setting_THC_Mode, Group_Plasma, "Plasma mode", NULL, Format_RadioButtons, "Off,Up/down,Voltage", NULL, NULL, Setting_NonCore, &plasma.mode, NULL, NULL },
+    { Setting_THC_Mode, Group_Plasma, "Plasma mode", NULL, Format_RadioButtons, "Off,Voltage,Up/down", NULL, NULL, Setting_NonCore, &plasma.mode, NULL, NULL },
     { Setting_THC_Delay, Group_Plasma, "Plasma THC delay", "s", Format_Decimal, "#0.0", NULL, NULL, Setting_NonCore, &plasma.thc_delay, NULL, NULL },
     { Setting_THC_Threshold, Group_Plasma, "Plasma THC threshold", "V", Format_Decimal, "#0.00", NULL, NULL, Setting_NonCore, &plasma.thc_threshold, NULL, NULL },
     { Setting_THC_PGain, Group_Plasma, "Plasma THC P-gain", NULL, Format_Decimal, "###0.000", NULL, NULL, Setting_NonCore, &plasma.pid.p_gain, NULL, NULL },

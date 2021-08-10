@@ -26,8 +26,8 @@
 
 typedef enum {
     Plasma_ModeOff = 0,
-    Plasma_ModeUpDown,
-    Plasma_ModeVoltage
+    Plasma_ModeVoltage = 1,
+    Plasma_ModeUpDown = 2
 } plasma_mode_t;
 
 typedef struct {
