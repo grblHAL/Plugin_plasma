@@ -399,6 +399,33 @@ static const setting_detail_t plasma_settings[] = {
     { Setting_Arc_OkLowVoltage, Group_Plasma, "Plasma Arc ok low volts", "V", Format_Decimal, "###0.000", NULL, NULL, Setting_NonCore, &plasma.arc_ok_low_voltage, NULL, NULL }
 };
 
+#ifndef NO_SETTINGS_DESCRIPTIONS
+
+static const setting_descr_t plasma_settings_descr[] = {
+    { Setting_THC_Mode, "" },
+    { Setting_THC_Delay, "Delay from cut start until THC activates." },
+    { Setting_THC_Threshold, "Variation from target voltage for THC to correct height." },
+    { Setting_THC_PGain, "" },
+    { Setting_THC_IGain, "" },
+    { Setting_THC_DGain, "" },
+    { Setting_THC_VADThreshold, "Percentage of Cut Feed Rate velocity needs to fall below to lock THC." },
+    { Setting_THC_VoidOverride, "Higher values need greater voltage change to lock THC." },
+    { Setting_Arc_FailTimeout, "The amount of time to wait from torch on until a failure if arc is not detected." },
+    { Setting_Arc_RetryDelay, "The time between an arc failure and another arc start attempt." },
+    { Setting_Arc_MaxRetries, "The number of attempts at starting an arc." },
+    { Setting_Arc_VoltageScale, "The value required to scale the arc voltage input to display the correct arc voltage." },
+    { Setting_Arc_VoltageOffset, "The value required to display zero volts when there is zero arc voltage input.\n"
+                                 "For initial setup multiply the arc voltage out value by -1 and enter that for Voltage Offset."
+    },
+    { Setting_Arc_HeightPerVolt, "The distance the torch would need to move to change the arc voltage by one volt.\n"
+                                 "Used for manual height change only."
+    },
+    { Setting_Arc_OkHighVoltage, "High voltage threshold for Arc OK." },
+    { Setting_Arc_OkLowVoltage, "Low voltage threshold for Arc OK." },
+};
+
+#endif
+
 static void plasma_settings_save (void)
 {
     hal.nvs.memcpy_to_nvs(nvs_address, (uint8_t *)&plasma, sizeof(plasma_settings_t), true);
@@ -409,6 +436,10 @@ static setting_details_t details = {
     .n_groups = sizeof(plasma_groups) / sizeof(setting_group_detail_t),
     .settings = plasma_settings,
     .n_settings = sizeof(plasma_settings) / sizeof(setting_detail_t),
+#ifndef NO_SETTINGS_DESCRIPTIONS
+    .descriptions = plasma_settings_descr,
+    .n_descriptions = sizeof(plasma_settings_descr) / sizeof(setting_descr_t),
+#endif
     .save = plasma_settings_save,
     .load = plasma_settings_load,
     .restore = plasma_settings_restore
