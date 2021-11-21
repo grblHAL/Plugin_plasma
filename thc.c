@@ -45,6 +45,36 @@
 // Analog ports
 #define PLASMA_FEED_OVERRIDE_PORT 3
 
+typedef enum {
+    Plasma_ModeOff = 0,
+    Plasma_ModeVoltage = 1,
+    Plasma_ModeUpDown = 2
+} plasma_mode_t;
+
+typedef struct {
+    float thc_delay;
+    float thc_threshold;
+    uint32_t vad_threshold;
+    uint32_t thc_override;
+    float pierce_height;
+    float pierce_delay;
+    float pause_at_end;
+    float arc_retry_delay;
+    float arc_fail_timeout;
+    float arc_voltage_scale;
+    float arc_voltage_offset;
+    float arc_height_per_volt;
+    float arc_ok_low_voltage;
+    float arc_high_low_voltage;
+    uint_fast8_t arc_retries;
+    plasma_mode_t mode;
+    pid_values_t pid;
+    uint8_t port_arc_voltage;
+    uint8_t port_arc_ok;
+    uint8_t port_cutter_down;
+    uint8_t port_cutter_up;
+} plasma_settings_t;
+
 typedef union {
     uint16_t value;
     struct {
@@ -86,12 +116,13 @@ static on_realtime_report_ptr on_realtime_report = NULL;
 static control_signals_callback_ptr control_interrupt_callback = NULL;
 static stepper_pulse_start_ptr stepper_pulse_start = NULL;
 static nvs_address_t nvs_address;
-static driver_setup_ptr driver_setup;
 static settings_changed_ptr settings_changed;
 static plasma_settings_t plasma;
 static on_report_options_ptr on_report_options;
 static enumerate_pins_ptr enumerate_pins;
 static io_port_t port = {0};
+static uint8_t n_ain, n_din;
+static char max_aport[4], max_dport[4];
 
 static void plasma_settings_restore (void);
 static void plasma_settings_load (void);
@@ -312,22 +343,6 @@ static void stepperPulseStart (stepper_t *stepper)
     stepper_pulse_start(stepper);
 }
 
-// Reclaim entry points that may have been changed on settings change.
-static void onSettingsChanged (settings_t *settings)
-{
-    settings_changed(settings);
-
-    if(hal.spindle.set_state != arcSetState) {
-        spindle_set_state_ = hal.spindle.set_state;
-        hal.spindle.set_state = arcSetState;
-    }
-
-    if(hal.stepper.pulse_start != stepperPulseStart) {
-        stepper_pulse_start = hal.stepper.pulse_start;
-        hal.stepper.pulse_start = stepperPulseStart;
-    }
-}
-
 // Trap cycle start commands and redirect to foreground process
 // by temporarily claiming the HAL execute_realtime entry point
 // in order to execute probing and spindle/coolant change.
@@ -376,6 +391,36 @@ static void onRealtimeReport (stream_write_ptr stream_write, report_tracking_fla
         on_realtime_report(stream_write, report);
 }
 
+static void plasma_setup (settings_t *settings)
+{
+    settings_changed(settings);
+
+    if(!driver_reset) {
+
+        driver_reset = hal.driver_reset;
+        hal.driver_reset = reset;
+
+        on_execute_realtime = grbl.on_execute_realtime;
+        grbl.on_execute_realtime = onExecuteRealtime;
+
+        on_realtime_report = grbl.on_realtime_report;
+        grbl.on_realtime_report = onRealtimeReport;
+
+    }
+
+    // Reclaim entry points that may have been changed on settings change.
+
+    if(hal.spindle.set_state != arcSetState) {
+        spindle_set_state_ = hal.spindle.set_state;
+        hal.spindle.set_state = arcSetState;
+    }
+
+    if(hal.stepper.pulse_start != stepperPulseStart) {
+        stepper_pulse_start = hal.stepper.pulse_start;
+        hal.stepper.pulse_start = stepperPulseStart;
+    }
+}
+
 static const setting_group_detail_t plasma_groups [] = {
     { Group_Root, Group_Plasma, "Plasma"},
 };
@@ -396,7 +441,11 @@ static const setting_detail_t plasma_settings[] = {
     { Setting_Arc_VoltageOffset, Group_Plasma, "Plasma Arc voltage offset", NULL, Format_Decimal, "###0.000", NULL, NULL, Setting_NonCore, &plasma.arc_voltage_offset, NULL, NULL },
     { Setting_Arc_HeightPerVolt, Group_Plasma, "Plasma Arc height per volt", "mm", Format_Decimal, "###0.000", NULL, NULL, Setting_NonCore, &plasma.arc_height_per_volt, NULL, NULL },
     { Setting_Arc_OkHighVoltage, Group_Plasma, "Plasma Arc ok high volts", "V", Format_Decimal, "###0.000", NULL, NULL, Setting_NonCore, &plasma.arc_high_low_voltage, NULL, NULL },
-    { Setting_Arc_OkLowVoltage, Group_Plasma, "Plasma Arc ok low volts", "V", Format_Decimal, "###0.000", NULL, NULL, Setting_NonCore, &plasma.arc_ok_low_voltage, NULL, NULL }
+    { Setting_Arc_OkLowVoltage, Group_Plasma, "Plasma Arc ok low volts", "V", Format_Decimal, "###0.000", NULL, NULL, Setting_NonCore, &plasma.arc_ok_low_voltage, NULL, NULL },
+    { Setting_Arc_VoltagePort, Group_AuxPorts, "Arc voltage port", NULL, Format_Int8, "#0", "0", max_aport, Setting_NonCore, &plasma.port_arc_voltage, NULL, NULL },
+    { Setting_Arc_OkPort, Group_AuxPorts, "Arc ok port", NULL, Format_Int8, "#0", "0", max_dport, Setting_NonCore, &plasma.port_arc_ok, NULL, NULL },
+    { Setting_THC_CutterDownPort, Group_AuxPorts, "Cutter down port", NULL, Format_Int8, "#0", "0", max_dport, Setting_NonCore, &plasma.port_cutter_down, NULL, NULL },
+    { Setting_THC_CutterUpPort, Group_AuxPorts, "Cutter up port", NULL, Format_Int8, "#0", "0", max_dport, Setting_NonCore, &plasma.port_cutter_up, NULL, NULL }
 };
 
 #ifndef NO_SETTINGS_DESCRIPTIONS
@@ -422,6 +471,10 @@ static const setting_descr_t plasma_settings_descr[] = {
     },
     { Setting_Arc_OkHighVoltage, "High voltage threshold for Arc OK." },
     { Setting_Arc_OkLowVoltage, "Low voltage threshold for Arc OK." },
+    { Setting_Arc_VoltagePort, "Aux port number to use for arc voltage." SETTINGS_HARD_RESET_REQUIRED },
+    { Setting_Arc_OkPort, "Aux port number to use for arc ok signal." SETTINGS_HARD_RESET_REQUIRED },
+    { Setting_THC_CutterDownPort, "Aux port number to use for cutter down signal." SETTINGS_HARD_RESET_REQUIRED },
+    { Setting_THC_CutterUpPort, "Aux port number to use for cutter up signal." SETTINGS_HARD_RESET_REQUIRED }
 };
 
 #endif
@@ -445,7 +498,7 @@ static setting_details_t details = {
     .restore = plasma_settings_restore
 };
 
-static setting_details_t *onReportSettings (void)
+static setting_details_t *plasma_get_settings (void)
 {
     return &details;
 }
@@ -473,18 +526,54 @@ static void plasma_settings_restore (void)
     plasma.pid.i_gain = 0.0f;
     plasma.pid.d_gain = 0.0f;
 
-    hal.nvs.memcpy_to_nvs(nvs_address, (uint8_t *)&plasma, sizeof(plasma_settings_t), true);
-}
+    if(ioport_can_claim_explicit()) {
+        plasma.port_arc_voltage = n_ain - 1;
+        plasma.port_arc_ok = n_din - 1;
+        plasma.port_cutter_down = n_din - 2;
+        plasma.port_cutter_up = n_din - 3;
+    }
 
-static void plasma_settings_load (void)
-{
-    if(hal.nvs.memcpy_from_nvs((uint8_t *)&plasma, nvs_address, sizeof(plasma_settings_t), true) != NVS_TransferResult_OK)
-        plasma_settings_restore();
+    hal.nvs.memcpy_to_nvs(nvs_address, (uint8_t *)&plasma, sizeof(plasma_settings_t), true);
 }
 
 static void plasma_warning (uint_fast16_t state)
 {
     report_message("Plasma mode failed to initialize!", Message_Warning);
+}
+
+static void plasma_settings_load (void)
+{
+    bool ok = true;
+
+    if(hal.nvs.memcpy_from_nvs((uint8_t *)&plasma, nvs_address, sizeof(plasma_settings_t), true) != NVS_TransferResult_OK)
+        plasma_settings_restore();
+
+    port_arc_voltage = plasma.port_arc_voltage;
+    port_arc_ok = plasma.port_arc_ok;
+    port_cutter_down = plasma.port_cutter_down;
+    port_cutter_up = plasma.port_cutter_up;
+
+    if(ioport_can_claim_explicit()) {
+        ok = ioport_claim(Port_Analog, Port_Input, &port_arc_voltage, "Arc voltage");
+        ok &= ioport_claim(Port_Digital, Port_Input, &port_arc_ok, "Arc ok");
+        ok &= ioport_claim(Port_Digital, Port_Input, &port_cutter_down, "Cutter down");
+        ok &= ioport_claim(Port_Digital, Port_Input, &port_cutter_up, "Cutter up");
+    }
+
+    if(ok) {
+
+        memcpy(&port, &hal.port, sizeof(io_port_t));
+        hal.port.digital_out = digital_out;
+        hal.port.analog_out = analog_out;
+        hal.port.num_digital_out = max(port.num_digital_out, PLASMA_TORCH_DISABLE_PORT);
+        hal.port.num_analog_out = max(port.num_analog_out, PLASMA_FEED_OVERRIDE_PORT);
+
+        settings_changed = hal.settings_changed;
+        hal.settings_changed = plasma_setup;
+
+    } else
+        protocol_enqueue_rt_command(plasma_warning);
+
 }
 
 static void enumeratePins (bool low_level, pin_info_ptr pin_info)
@@ -522,101 +611,66 @@ static void enumeratePins (bool low_level, pin_info_ptr pin_info)
 
 }
 
-static void onReportOptions (bool newopt)
+static void plasma_report_options (bool newopt)
 {
     on_report_options(newopt);
 
-    if(newopt)
-        hal.stream.write(",THC");
-    else
+    if(!newopt)
         hal.stream.write("[PLUGIN:PLASMA v0.02]" ASCII_EOL);
-}
-
-static bool on_driver_setup (settings_t *settings)
-{
-    bool ok;
-
-    if((ok = driver_setup(settings))) {
-
-        spindle_set_state_ = hal.spindle.set_state;
-        hal.spindle.set_state = arcSetState;
-
-        on_execute_realtime = grbl.on_execute_realtime;
-        grbl.on_execute_realtime = onExecuteRealtime;
-
-        on_realtime_report = grbl.on_realtime_report;
-        grbl.on_realtime_report = onRealtimeReport;
-
-        stepper_pulse_start = hal.stepper.pulse_start;
-        hal.stepper.pulse_start = stepperPulseStart;
-
-        settings_changed = hal.settings_changed;
-        hal.settings_changed = onSettingsChanged;
-    }
-
-    return ok;
+    else if(driver_reset) // non-null when successfully enabled
+        hal.stream.write(",THC");
 }
 
 bool plasma_init (void)
 {
-    if(hal.port.num_analog_in >= 1 && hal.port.num_digital_in >= 1 && hal.port.wait_on_input && hal.stepper.output_step) {
+    bool ok;
 
-        if ((nvs_address = nvs_alloc(sizeof(plasma_settings_t)))) {
+    n_ain = ioports_available(Port_Analog, Port_Input);
+    n_din = ioports_available(Port_Digital, Port_Input);
+    ok = n_ain >= 1 && n_din >= 3;
 
-            if(port.wait_on_input == NULL) {
+    if(ok) {
 
-                memcpy(&port, &hal.port, sizeof(io_port_t));
-                hal.port.digital_out = digital_out;
-                hal.port.analog_out = analog_out;
-                hal.port.num_digital_out = max(port.num_digital_out, PLASMA_TORCH_DISABLE_PORT);
-                hal.port.num_analog_out = max(port.num_analog_out, PLASMA_FEED_OVERRIDE_PORT);
+        if(!ioport_can_claim_explicit()) {
 
-                port_arc_ok = --hal.port.num_digital_in;
-                port_arc_voltage = --hal.port.num_analog_in;
+            // Driver does not support explicit port claiming, claim the highest numbered ports instead.
 
-                if(hal.port.set_pin_description) {
-                    hal.port.set_pin_description(Port_Digital, Port_Input, port_arc_ok, "Arc ok");
-                    hal.port.set_pin_description(Port_Analog, Port_Input, port_arc_voltage, "Arc voltage");
-                }
-
-                if((updown_enabled = hal.port.num_digital_in >= 2)) {
-                    port_cutter_up = --hal.port.num_digital_in;
-                    port_cutter_down = --hal.port.num_digital_in;
-                    hal.port.set_pin_description(Port_Digital, Port_Input, port_cutter_up, "Cutter up");
-                    hal.port.set_pin_description(Port_Digital, Port_Input, port_cutter_down, "Cutter down");
-                }
-
-                driver_setup = hal.driver_setup;
-                hal.driver_setup = on_driver_setup;
-
-                driver_reset = hal.driver_reset;
-                hal.driver_reset = reset;
-
-                on_report_options = grbl.on_report_options;
-                grbl.on_report_options = onReportOptions;
-
-                details.on_get_settings = grbl.on_get_settings;
-                grbl.on_get_settings = onReportSettings;
-
-                hal.driver_cap.spindle_at_speed = Off;
-
-/*
-                enumerate_pins = hal.enumerate_pins;
-                hal.enumerate_pins = enumeratePins;
-
-                control_interrupt_callback = hal.control_interrupt_callback;
-                hal.control_interrupt_callback = trap_control_interrupts;
-*/
-
-                pidf_init(&pid, &plasma.pid);
+            if((ok = (nvs_address = nvs_alloc(sizeof(plasma_settings_t))))) {
+                plasma.port_arc_ok = --hal.port.num_analog_in;
+                plasma.port_arc_ok = --hal.port.num_digital_in;
+                plasma.port_cutter_down = --hal.port.num_digital_in;
+                plasma.port_cutter_up = --hal.port.num_digital_in;
             }
-        }
+
+        } else
+            ok = (nvs_address = nvs_alloc(sizeof(plasma_settings_t)));
     }
 
-    if(nvs_address == 0)
+    if(ok) {
+
+        strcpy(max_aport, uitoa(n_ain - 1));
+        strcpy(max_dport, uitoa(n_din - 1));
+
+        on_report_options = grbl.on_report_options;
+        grbl.on_report_options = plasma_report_options;
+
+        details.on_get_settings = grbl.on_get_settings;
+        grbl.on_get_settings = plasma_get_settings;
+
+        enumerate_pins = hal.enumerate_pins;
+        hal.enumerate_pins = enumeratePins;
+/*
+        control_interrupt_callback = hal.control_interrupt_callback;
+        hal.control_interrupt_callback = trap_control_interrupts;
+*/
+        hal.driver_cap.spindle_at_speed = Off;
+
+        pidf_init(&pid, &plasma.pid);
+
+    } else
         protocol_enqueue_rt_command(plasma_warning);
 
-    return nvs_address != 0;
+    return ok;
 }
 
 #endif

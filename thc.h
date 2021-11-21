@@ -24,32 +24,6 @@
 #ifndef _THC_H_
 #define _THC_H_
 
-typedef enum {
-    Plasma_ModeOff = 0,
-    Plasma_ModeVoltage = 1,
-    Plasma_ModeUpDown = 2
-} plasma_mode_t;
-
-typedef struct {
-    float thc_delay;
-    float thc_threshold;
-    uint32_t vad_threshold;
-    uint32_t thc_override;
-    float pierce_height;
-    float pierce_delay;
-    float pause_at_end;
-    float arc_retry_delay;
-    float arc_fail_timeout;
-    float arc_voltage_scale;
-    float arc_voltage_offset;
-    float arc_height_per_volt;
-    float arc_ok_low_voltage;
-    float arc_high_low_voltage;
-    uint_fast8_t arc_retries;
-    plasma_mode_t mode;
-    pid_values_t pid;
-} plasma_settings_t;
-
 bool plasma_init (void);
 
 #endif
