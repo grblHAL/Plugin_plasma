@@ -124,9 +124,6 @@ static io_port_t port = {0};
 static uint8_t n_ain, n_din;
 static char max_aport[4], max_dport[4];
 
-static void plasma_settings_restore (void);
-static void plasma_settings_load (void);
-
 static void pause_on_error (void)
 {
     system_set_exec_state_flag(EXEC_TOOL_CHANGE);   // Set up program pause for manual tool change
@@ -484,25 +481,6 @@ static void plasma_settings_save (void)
     hal.nvs.memcpy_to_nvs(nvs_address, (uint8_t *)&plasma, sizeof(plasma_settings_t), true);
 }
 
-static setting_details_t details = {
-    .groups = plasma_groups,
-    .n_groups = sizeof(plasma_groups) / sizeof(setting_group_detail_t),
-    .settings = plasma_settings,
-    .n_settings = sizeof(plasma_settings) / sizeof(setting_detail_t),
-#ifndef NO_SETTINGS_DESCRIPTIONS
-    .descriptions = plasma_settings_descr,
-    .n_descriptions = sizeof(plasma_settings_descr) / sizeof(setting_descr_t),
-#endif
-    .save = plasma_settings_save,
-    .load = plasma_settings_load,
-    .restore = plasma_settings_restore
-};
-
-static setting_details_t *plasma_get_settings (void)
-{
-    return &details;
-}
-
 static void plasma_settings_restore (void)
 {
     plasma.mode = updown_enabled ? Plasma_ModeUpDown :  Plasma_ModeVoltage;
@@ -576,6 +554,20 @@ static void plasma_settings_load (void)
 
 }
 
+static setting_details_t setting_details = {
+    .groups = plasma_groups,
+    .n_groups = sizeof(plasma_groups) / sizeof(setting_group_detail_t),
+    .settings = plasma_settings,
+    .n_settings = sizeof(plasma_settings) / sizeof(setting_detail_t),
+#ifndef NO_SETTINGS_DESCRIPTIONS
+    .descriptions = plasma_settings_descr,
+    .n_descriptions = sizeof(plasma_settings_descr) / sizeof(setting_descr_t),
+#endif
+    .save = plasma_settings_save,
+    .load = plasma_settings_load,
+    .restore = plasma_settings_restore
+};
+
 static void enumeratePins (bool low_level, pin_info_ptr pin_info)
 {
     enumerate_pins(low_level, pin_info);
@@ -616,7 +608,7 @@ static void plasma_report_options (bool newopt)
     on_report_options(newopt);
 
     if(!newopt)
-        hal.stream.write("[PLUGIN:PLASMA v0.02]" ASCII_EOL);
+        hal.stream.write("[PLUGIN:PLASMA v0.03]" ASCII_EOL);
     else if(driver_reset) // non-null when successfully enabled
         hal.stream.write(",THC");
 }
@@ -651,11 +643,10 @@ bool plasma_init (void)
         strcpy(max_aport, uitoa(n_ain - 1));
         strcpy(max_dport, uitoa(n_din - 1));
 
+        settings_register(&setting_details);
+
         on_report_options = grbl.on_report_options;
         grbl.on_report_options = plasma_report_options;
-
-        details.on_get_settings = grbl.on_get_settings;
-        grbl.on_get_settings = plasma_get_settings;
 
         enumerate_pins = hal.enumerate_pins;
         hal.enumerate_pins = enumeratePins;
