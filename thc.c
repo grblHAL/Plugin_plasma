@@ -423,26 +423,26 @@ static const setting_group_detail_t plasma_groups [] = {
 };
 
 static const setting_detail_t plasma_settings[] = {
-    { Setting_THC_Mode, Group_Plasma, "Plasma mode", NULL, Format_RadioButtons, "Off,Voltage,Up/down", NULL, NULL, Setting_NonCore, &plasma.mode, NULL, NULL, false },
-    { Setting_THC_Delay, Group_Plasma, "Plasma THC delay", "s", Format_Decimal, "#0.0", NULL, NULL, Setting_NonCore, &plasma.thc_delay, NULL, NULL, false },
-    { Setting_THC_Threshold, Group_Plasma, "Plasma THC threshold", "V", Format_Decimal, "#0.00", NULL, NULL, Setting_NonCore, &plasma.thc_threshold, NULL, NULL, false },
-    { Setting_THC_PGain, Group_Plasma, "Plasma THC P-gain", NULL, Format_Decimal, "###0.000", NULL, NULL, Setting_NonCore, &plasma.pid.p_gain, NULL, NULL, false },
-    { Setting_THC_IGain, Group_Plasma, "Plasma THC I-gain", NULL, Format_Decimal, "###0.000", NULL, NULL, Setting_NonCore, &plasma.pid.i_gain, NULL, NULL, false },
-    { Setting_THC_DGain, Group_Plasma, "Plasma THC D-gain", NULL, Format_Decimal, "###0.000", NULL, NULL, Setting_NonCore, &plasma.pid.d_gain, NULL, NULL, false },
-    { Setting_THC_VADThreshold, Group_Plasma, "Plasma THC VAD threshold", "percent", Format_Integer, "##0", "0", "100", Setting_NonCore, &plasma.vad_threshold, NULL, NULL, false },
-    { Setting_THC_VoidOverride, Group_Plasma, "Plasma THC Void override", "percent", Format_Integer, "##0", "0", "100", Setting_NonCore, &plasma.thc_override, NULL, NULL, false },
-    { Setting_Arc_FailTimeout, Group_Plasma, "Plasma Arc fail timeout", "seconds", Format_Decimal, "#0.0", NULL, NULL, Setting_NonCore, &plasma.arc_fail_timeout, NULL, NULL, false },
-    { Setting_Arc_RetryDelay, Group_Plasma, "Plasma Arc retry delay", "seconds", Format_Decimal, "#0.0", NULL, NULL, Setting_NonCore, &plasma.arc_retry_delay, NULL, NULL, false },
-    { Setting_Arc_MaxRetries, Group_Plasma, "Plasma Arc max retries", NULL, Format_Int8, "#0", NULL, NULL, Setting_NonCore, &plasma.arc_retries, NULL, NULL, false },
-    { Setting_Arc_VoltageScale, Group_Plasma, "Plasma Arc voltage scale", NULL, Format_Decimal, "###0.000", NULL, NULL, Setting_NonCore, &plasma.arc_voltage_scale, NULL, NULL, false },
-    { Setting_Arc_VoltageOffset, Group_Plasma, "Plasma Arc voltage offset", NULL, Format_Decimal, "###0.000", NULL, NULL, Setting_NonCore, &plasma.arc_voltage_offset, NULL, NULL, false },
-    { Setting_Arc_HeightPerVolt, Group_Plasma, "Plasma Arc height per volt", "mm", Format_Decimal, "###0.000", NULL, NULL, Setting_NonCore, &plasma.arc_height_per_volt, NULL, NULL, false },
-    { Setting_Arc_OkHighVoltage, Group_Plasma, "Plasma Arc ok high volts", "V", Format_Decimal, "###0.000", NULL, NULL, Setting_NonCore, &plasma.arc_high_low_voltage, NULL, NULL, false },
-    { Setting_Arc_OkLowVoltage, Group_Plasma, "Plasma Arc ok low volts", "V", Format_Decimal, "###0.000", NULL, NULL, Setting_NonCore, &plasma.arc_ok_low_voltage, NULL, NULL, false },
-    { Setting_Arc_VoltagePort, Group_AuxPorts, "Arc voltage port", NULL, Format_Int8, "#0", "0", max_aport, Setting_NonCore, &plasma.port_arc_voltage, NULL, NULL, true },
-    { Setting_Arc_OkPort, Group_AuxPorts, "Arc ok port", NULL, Format_Int8, "#0", "0", max_dport, Setting_NonCore, &plasma.port_arc_ok, NULL, NULL, true },
-    { Setting_THC_CutterDownPort, Group_AuxPorts, "Cutter down port", NULL, Format_Int8, "#0", "0", max_dport, Setting_NonCore, &plasma.port_cutter_down, NULL, NULL, true },
-    { Setting_THC_CutterUpPort, Group_AuxPorts, "Cutter up port", NULL, Format_Int8, "#0", "0", max_dport, Setting_NonCore, &plasma.port_cutter_up, NULL, NULL, true }
+    { Setting_THC_Mode, Group_Plasma, "Plasma mode", NULL, Format_RadioButtons, "Off,Voltage,Up/down", NULL, NULL, Setting_NonCore, &plasma.mode, NULL, NULL },
+    { Setting_THC_Delay, Group_Plasma, "Plasma THC delay", "s", Format_Decimal, "#0.0", NULL, NULL, Setting_NonCore, &plasma.thc_delay, NULL, NULL },
+    { Setting_THC_Threshold, Group_Plasma, "Plasma THC threshold", "V", Format_Decimal, "#0.00", NULL, NULL, Setting_NonCore, &plasma.thc_threshold, NULL, NULL },
+    { Setting_THC_PGain, Group_Plasma, "Plasma THC P-gain", NULL, Format_Decimal, "###0.000", NULL, NULL, Setting_NonCore, &plasma.pid.p_gain, NULL, NULL },
+    { Setting_THC_IGain, Group_Plasma, "Plasma THC I-gain", NULL, Format_Decimal, "###0.000", NULL, NULL, Setting_NonCore, &plasma.pid.i_gain, NULL, NULL },
+    { Setting_THC_DGain, Group_Plasma, "Plasma THC D-gain", NULL, Format_Decimal, "###0.000", NULL, NULL, Setting_NonCore, &plasma.pid.d_gain, NULL, NULL },
+    { Setting_THC_VADThreshold, Group_Plasma, "Plasma THC VAD threshold", "percent", Format_Integer, "##0", "0", "100", Setting_NonCore, &plasma.vad_threshold, NULL, NULL },
+    { Setting_THC_VoidOverride, Group_Plasma, "Plasma THC Void override", "percent", Format_Integer, "##0", "0", "100", Setting_NonCore, &plasma.thc_override, NULL, NULL },
+    { Setting_Arc_FailTimeout, Group_Plasma, "Plasma Arc fail timeout", "seconds", Format_Decimal, "#0.0", NULL, NULL, Setting_NonCore, &plasma.arc_fail_timeout, NULL, NULL },
+    { Setting_Arc_RetryDelay, Group_Plasma, "Plasma Arc retry delay", "seconds", Format_Decimal, "#0.0", NULL, NULL, Setting_NonCore, &plasma.arc_retry_delay, NULL, NULL },
+    { Setting_Arc_MaxRetries, Group_Plasma, "Plasma Arc max retries", NULL, Format_Int8, "#0", NULL, NULL, Setting_NonCore, &plasma.arc_retries, NULL, NULL },
+    { Setting_Arc_VoltageScale, Group_Plasma, "Plasma Arc voltage scale", NULL, Format_Decimal, "###0.000", NULL, NULL, Setting_NonCore, &plasma.arc_voltage_scale, NULL, NULL },
+    { Setting_Arc_VoltageOffset, Group_Plasma, "Plasma Arc voltage offset", NULL, Format_Decimal, "###0.000", NULL, NULL, Setting_NonCore, &plasma.arc_voltage_offset, NULL, NULL },
+    { Setting_Arc_HeightPerVolt, Group_Plasma, "Plasma Arc height per volt", "mm", Format_Decimal, "###0.000", NULL, NULL, Setting_NonCore, &plasma.arc_height_per_volt, NULL, NULL },
+    { Setting_Arc_OkHighVoltage, Group_Plasma, "Plasma Arc ok high volts", "V", Format_Decimal, "###0.000", NULL, NULL, Setting_NonCore, &plasma.arc_high_low_voltage, NULL, NULL },
+    { Setting_Arc_OkLowVoltage, Group_Plasma, "Plasma Arc ok low volts", "V", Format_Decimal, "###0.000", NULL, NULL, Setting_NonCore, &plasma.arc_ok_low_voltage, NULL, NULL },
+    { Setting_Arc_VoltagePort, Group_AuxPorts, "Arc voltage port", NULL, Format_Int8, "#0", "0", max_aport, Setting_NonCore, &plasma.port_arc_voltage, NULL, NULL, { .reboot_required = On } },
+    { Setting_Arc_OkPort, Group_AuxPorts, "Arc ok port", NULL, Format_Int8, "#0", "0", max_dport, Setting_NonCore, &plasma.port_arc_ok, NULL, NULL, { .reboot_required = On } },
+    { Setting_THC_CutterDownPort, Group_AuxPorts, "Cutter down port", NULL, Format_Int8, "#0", "0", max_dport, Setting_NonCore, &plasma.port_cutter_down, NULL, NULL, { .reboot_required = On } },
+    { Setting_THC_CutterUpPort, Group_AuxPorts, "Cutter up port", NULL, Format_Int8, "#0", "0", max_dport, Setting_NonCore, &plasma.port_cutter_up, NULL, NULL, { .reboot_required = On } }
 };
 
 #ifndef NO_SETTINGS_DESCRIPTIONS
