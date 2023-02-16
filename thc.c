@@ -4,7 +4,7 @@
 
   Part of grblHAL
 
-  Copyright (c) 2020-2021 Terje Io
+  Copyright (c) 2020-2023 Terje Io
 
   Grbl is free software: you can redistribute it and/or modify
   it under the terms of the GNU General Public License as published by
@@ -93,36 +93,37 @@ typedef union {
     };
 } thc_signals_t;
 
-static uint8_t port_arc_ok, port_arc_voltage, port_cutter_down, port_cutter_up;
-static thc_signals_t thc = {0};
-static float arc_vref = 0.0f, arc_voltage = 0.0f, arc_voltage_low, arc_voltage_high, vad_threshold;
-static float fr_pgm, fr_actual, fr_thr_99, fr_thr_vad;
-static uint_fast8_t feed_override, segment_id = 0;
-static bool set_feed_override = false, updown_enabled = false;
-
 static void state_idle (void);
 static void state_thc_delay (void);
 static void state_thc_pid (void);
 static void state_thc_adjust (void);
 static void state_vad_lock (void);
 
+static bool set_feed_override = false, updown_enabled = false;
+static uint8_t n_ain, n_din;
+static uint8_t port_arc_ok, port_arc_voltage, port_cutter_down, port_cutter_up;
+static uint_fast8_t feed_override, segment_id = 0;
 static uint32_t thc_delay = 0;
+static char max_aport[4], max_dport[4];
+static float arc_vref = 0.0f, arc_voltage = 0.0f, arc_voltage_low, arc_voltage_high; //, vad_threshold;
+static float fr_pgm, fr_actual, fr_thr_99, fr_thr_vad;
+static io_port_t port = {0};
+static thc_signals_t thc = {0};
 static pidf_t pid;
+static nvs_address_t nvs_address;
+static plasma_settings_t plasma;
 static void (*volatile stateHandler)(void) = state_idle;
+
+static settings_changed_ptr settings_changed;
 static driver_reset_ptr driver_reset = NULL;
 static spindle_set_state_ptr spindle_set_state_ = NULL;
+//static control_signals_callback_ptr control_interrupt_callback = NULL;
+static stepper_pulse_start_ptr stepper_pulse_start = NULL;
+static enumerate_pins_ptr enumerate_pins;
+static on_report_options_ptr on_report_options;
+static on_spindle_selected_ptr on_spindle_selected;
 static on_execute_realtime_ptr on_execute_realtime = NULL;
 static on_realtime_report_ptr on_realtime_report = NULL;
-static control_signals_callback_ptr control_interrupt_callback = NULL;
-static stepper_pulse_start_ptr stepper_pulse_start = NULL;
-static nvs_address_t nvs_address;
-static settings_changed_ptr settings_changed;
-static plasma_settings_t plasma;
-static on_report_options_ptr on_report_options;
-static enumerate_pins_ptr enumerate_pins;
-static io_port_t port = {0};
-static uint8_t n_ain, n_din;
-static char max_aport[4], max_dport[4];
 
 static void pause_on_error (void)
 {
@@ -344,11 +345,13 @@ static void stepperPulseStart (stepper_t *stepper)
 // by temporarily claiming the HAL execute_realtime entry point
 // in order to execute probing and spindle/coolant change.
 // TODO: move to state machine with own EXEC_ bit?
+/*
 ISR_CODE static void trap_control_interrupts (control_signals_t signals)
 {
     if(signals.value)
         control_interrupt_callback(signals);
 }
+*/
 
 static void onRealtimeReport (stream_write_ptr stream_write, report_tracking_flags_t report)
 {
@@ -388,9 +391,20 @@ static void onRealtimeReport (stream_write_ptr stream_write, report_tracking_fla
         on_realtime_report(stream_write, report);
 }
 
-static void plasma_setup (settings_t *settings)
+static void onSpindleSelected (spindle_ptrs_t *spindle)
 {
-    settings_changed(settings);
+    spindle_set_state_ = spindle->set_state;
+
+    spindle->set_state = arcSetState;
+    spindle->cap.at_speed = Off; // TODO: only disable if PWM spindle active?
+
+    if(on_spindle_selected)
+        on_spindle_selected(spindle);
+}
+
+static void plasma_setup (settings_t *settings, settings_changed_flags_t changed)
+{
+    settings_changed(settings, changed);
 
     if(!driver_reset) {
 
@@ -402,15 +416,9 @@ static void plasma_setup (settings_t *settings)
 
         on_realtime_report = grbl.on_realtime_report;
         grbl.on_realtime_report = onRealtimeReport;
-
     }
 
     // Reclaim entry points that may have been changed on settings change.
-
-    if(hal.spindle.set_state != arcSetState) {
-        spindle_set_state_ = hal.spindle.set_state;
-        hal.spindle.set_state = arcSetState;
-    }
 
     if(hal.stepper.pulse_start != stepperPulseStart) {
         stepper_pulse_start = hal.stepper.pulse_start;
@@ -551,7 +559,6 @@ static void plasma_settings_load (void)
 
     } else
         protocol_enqueue_rt_command(plasma_warning);
-
 }
 
 static setting_details_t setting_details = {
@@ -608,7 +615,7 @@ static void plasma_report_options (bool newopt)
     on_report_options(newopt);
 
     if(!newopt)
-        hal.stream.write("[PLUGIN:PLASMA v0.03]" ASCII_EOL);
+        hal.stream.write("[PLUGIN:PLASMA v0.04]" ASCII_EOL);
     else if(driver_reset) // non-null when successfully enabled
         hal.stream.write(",THC");
 }
@@ -648,13 +655,15 @@ bool plasma_init (void)
         on_report_options = grbl.on_report_options;
         grbl.on_report_options = plasma_report_options;
 
+        on_spindle_selected = grbl.on_spindle_selected;
+        grbl.on_spindle_selected = onSpindleSelected;
+
         enumerate_pins = hal.enumerate_pins;
         hal.enumerate_pins = enumeratePins;
 /*
         control_interrupt_callback = hal.control_interrupt_callback;
         hal.control_interrupt_callback = trap_control_interrupts;
 */
-        hal.spindle.cap.at_speed = Off; // TODO: only disable if PWM spindle active
 
         pidf_init(&pid, &plasma.pid);
 
