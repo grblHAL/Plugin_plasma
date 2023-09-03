@@ -111,6 +111,7 @@ static io_port_t port = {0};
 static thc_signals_t thc = {0};
 static pidf_t pid;
 static nvs_address_t nvs_address;
+static char thc_modes[] = "Off,Voltage,Up/down";
 static plasma_settings_t plasma;
 static void (*volatile stateHandler)(void) = state_idle;
 
@@ -205,9 +206,9 @@ static void state_thc_adjust (void)
 {
     if((thc.arc_ok = port.wait_on_input(Port_Digital, port_arc_ok, WaitMode_Immediate, 0.0f) == 1)) {
         if(updown_enabled) {
-            if(port.wait_on_input(Port_Digital, port_cutter_up, WaitMode_Immediate, 0.0f))
+            if((thc.up = port.wait_on_input(Port_Digital, port_cutter_up, WaitMode_Immediate, 0.0f) == 1))
                 hal.stepper.output_step((axes_signals_t){Z_AXIS_BIT}, (axes_signals_t){Z_AXIS_BIT});
-            else if(port.wait_on_input(Port_Digital, port_cutter_down, WaitMode_Immediate, 0.0f))
+            else if((thc.down = port.wait_on_input(Port_Digital, port_cutter_down, WaitMode_Immediate, 0.0f) == 1))
                 hal.stepper.output_step((axes_signals_t){Z_AXIS_BIT}, (axes_signals_t){0});
         }
     } else
@@ -365,19 +366,19 @@ static void onRealtimeReport (stream_write_ptr stream_write, report_tracking_fla
 
     if (thc.value) {
         *append++ = ',';
-        if (thc.arc_ok)
+        if(thc.arc_ok)
             *append++ = 'A';
-        if (thc.enabled)
+        if(thc.enabled)
             *append++ = 'E';
-        if (thc.active)
+        if(thc.active)
             *append++ = 'R';
-        if (thc.torch_on)
+        if(thc.torch_on)
             *append++ = 'T';
-        if (thc.ohmic_probe)
+        if(thc.ohmic_probe)
             *append++ = 'O';
-        if (thc.velocity_lock)
+        if(thc.velocity_lock)
             *append++ = 'V';
-        if (thc.void_lock)
+        if(thc.void_lock)
             *append++ = 'H';
         if(thc.down)
             *append++ = 'D';
@@ -426,31 +427,50 @@ static void plasma_setup (settings_t *settings, settings_changed_flags_t changed
     }
 }
 
-static const setting_group_detail_t plasma_groups [] = {
-    { Group_Root, Group_Plasma, "Plasma"},
+static const setting_group_detail_t plasma_groups[] = {
+    { Group_Root, Group_Plasma, "Plasma" },
 };
 
+static bool is_setting_available (const setting_detail_t *setting)
+{
+    bool ok = false;
+
+    switch(setting->id) {
+
+        case Setting_THC_CutterDownPort:
+        case Setting_THC_CutterUpPort:
+            ok = n_din >= 3;
+            break;
+
+        default:
+            ok = n_ain >= 1;
+            break;
+    }
+
+    return ok;
+}
+
 static const setting_detail_t plasma_settings[] = {
-    { Setting_THC_Mode, Group_Plasma, "Plasma mode", NULL, Format_RadioButtons, "Off,Voltage,Up/down", NULL, NULL, Setting_NonCore, &plasma.mode, NULL, NULL },
+    { Setting_THC_Mode, Group_Plasma, "Plasma mode", NULL, Format_RadioButtons, thc_modes, NULL, NULL, Setting_NonCore, &plasma.mode, NULL, NULL },
     { Setting_THC_Delay, Group_Plasma, "Plasma THC delay", "s", Format_Decimal, "#0.0", NULL, NULL, Setting_NonCore, &plasma.thc_delay, NULL, NULL },
-    { Setting_THC_Threshold, Group_Plasma, "Plasma THC threshold", "V", Format_Decimal, "#0.00", NULL, NULL, Setting_NonCore, &plasma.thc_threshold, NULL, NULL },
-    { Setting_THC_PGain, Group_Plasma, "Plasma THC P-gain", NULL, Format_Decimal, "###0.000", NULL, NULL, Setting_NonCore, &plasma.pid.p_gain, NULL, NULL },
-    { Setting_THC_IGain, Group_Plasma, "Plasma THC I-gain", NULL, Format_Decimal, "###0.000", NULL, NULL, Setting_NonCore, &plasma.pid.i_gain, NULL, NULL },
-    { Setting_THC_DGain, Group_Plasma, "Plasma THC D-gain", NULL, Format_Decimal, "###0.000", NULL, NULL, Setting_NonCore, &plasma.pid.d_gain, NULL, NULL },
-    { Setting_THC_VADThreshold, Group_Plasma, "Plasma THC VAD threshold", "percent", Format_Integer, "##0", "0", "100", Setting_NonCore, &plasma.vad_threshold, NULL, NULL },
-    { Setting_THC_VoidOverride, Group_Plasma, "Plasma THC Void override", "percent", Format_Integer, "##0", "0", "100", Setting_NonCore, &plasma.thc_override, NULL, NULL },
+    { Setting_THC_Threshold, Group_Plasma, "Plasma THC threshold", "V", Format_Decimal, "#0.00", NULL, NULL, Setting_NonCore, &plasma.thc_threshold, NULL, is_setting_available },
+    { Setting_THC_PGain, Group_Plasma, "Plasma THC P-gain", NULL, Format_Decimal, "###0.000", NULL, NULL, Setting_NonCore, &plasma.pid.p_gain, NULL, is_setting_available },
+    { Setting_THC_IGain, Group_Plasma, "Plasma THC I-gain", NULL, Format_Decimal, "###0.000", NULL, NULL, Setting_NonCore, &plasma.pid.i_gain, NULL, is_setting_available },
+    { Setting_THC_DGain, Group_Plasma, "Plasma THC D-gain", NULL, Format_Decimal, "###0.000", NULL, NULL, Setting_NonCore, &plasma.pid.d_gain, NULL, is_setting_available },
+    { Setting_THC_VADThreshold, Group_Plasma, "Plasma THC VAD threshold", "percent", Format_Integer, "##0", "0", "100", Setting_NonCore, &plasma.vad_threshold, NULL, is_setting_available },
+    { Setting_THC_VoidOverride, Group_Plasma, "Plasma THC Void override", "percent", Format_Integer, "##0", "0", "100", Setting_NonCore, &plasma.thc_override, NULL, is_setting_available },
     { Setting_Arc_FailTimeout, Group_Plasma, "Plasma Arc fail timeout", "seconds", Format_Decimal, "#0.0", NULL, NULL, Setting_NonCore, &plasma.arc_fail_timeout, NULL, NULL },
     { Setting_Arc_RetryDelay, Group_Plasma, "Plasma Arc retry delay", "seconds", Format_Decimal, "#0.0", NULL, NULL, Setting_NonCore, &plasma.arc_retry_delay, NULL, NULL },
     { Setting_Arc_MaxRetries, Group_Plasma, "Plasma Arc max retries", NULL, Format_Int8, "#0", NULL, NULL, Setting_NonCore, &plasma.arc_retries, NULL, NULL },
-    { Setting_Arc_VoltageScale, Group_Plasma, "Plasma Arc voltage scale", NULL, Format_Decimal, "###0.000", NULL, NULL, Setting_NonCore, &plasma.arc_voltage_scale, NULL, NULL },
-    { Setting_Arc_VoltageOffset, Group_Plasma, "Plasma Arc voltage offset", NULL, Format_Decimal, "###0.000", NULL, NULL, Setting_NonCore, &plasma.arc_voltage_offset, NULL, NULL },
-    { Setting_Arc_HeightPerVolt, Group_Plasma, "Plasma Arc height per volt", "mm", Format_Decimal, "###0.000", NULL, NULL, Setting_NonCore, &plasma.arc_height_per_volt, NULL, NULL },
-    { Setting_Arc_OkHighVoltage, Group_Plasma, "Plasma Arc ok high volts", "V", Format_Decimal, "###0.000", NULL, NULL, Setting_NonCore, &plasma.arc_high_low_voltage, NULL, NULL },
-    { Setting_Arc_OkLowVoltage, Group_Plasma, "Plasma Arc ok low volts", "V", Format_Decimal, "###0.000", NULL, NULL, Setting_NonCore, &plasma.arc_ok_low_voltage, NULL, NULL },
-    { Setting_Arc_VoltagePort, Group_AuxPorts, "Arc voltage port", NULL, Format_Int8, "#0", "0", max_aport, Setting_NonCore, &plasma.port_arc_voltage, NULL, NULL, { .reboot_required = On } },
+    { Setting_Arc_VoltageScale, Group_Plasma, "Plasma Arc voltage scale", NULL, Format_Decimal, "###0.000", NULL, NULL, Setting_NonCore, &plasma.arc_voltage_scale, NULL, is_setting_available },
+    { Setting_Arc_VoltageOffset, Group_Plasma, "Plasma Arc voltage offset", NULL, Format_Decimal, "###0.000", NULL, NULL, Setting_NonCore, &plasma.arc_voltage_offset, NULL, is_setting_available },
+    { Setting_Arc_HeightPerVolt, Group_Plasma, "Plasma Arc height per volt", "mm", Format_Decimal, "###0.000", NULL, NULL, Setting_NonCore, &plasma.arc_height_per_volt, NULL, is_setting_available },
+    { Setting_Arc_OkHighVoltage, Group_Plasma, "Plasma Arc ok high volts", "V", Format_Decimal, "###0.000", NULL, NULL, Setting_NonCore, &plasma.arc_high_low_voltage, NULL, is_setting_available },
+    { Setting_Arc_OkLowVoltage, Group_Plasma, "Plasma Arc ok low volts", "V", Format_Decimal, "###0.000", NULL, NULL, Setting_NonCore, &plasma.arc_ok_low_voltage, NULL, is_setting_available },
+    { Setting_Arc_VoltagePort, Group_AuxPorts, "Arc voltage port", NULL, Format_Int8, "#0", "0", max_aport, Setting_NonCore, &plasma.port_arc_voltage, NULL, is_setting_available, { .reboot_required = On } },
     { Setting_Arc_OkPort, Group_AuxPorts, "Arc ok port", NULL, Format_Int8, "#0", "0", max_dport, Setting_NonCore, &plasma.port_arc_ok, NULL, NULL, { .reboot_required = On } },
-    { Setting_THC_CutterDownPort, Group_AuxPorts, "Cutter down port", NULL, Format_Int8, "#0", "0", max_dport, Setting_NonCore, &plasma.port_cutter_down, NULL, NULL, { .reboot_required = On } },
-    { Setting_THC_CutterUpPort, Group_AuxPorts, "Cutter up port", NULL, Format_Int8, "#0", "0", max_dport, Setting_NonCore, &plasma.port_cutter_up, NULL, NULL, { .reboot_required = On } }
+    { Setting_THC_CutterDownPort, Group_AuxPorts, "Cutter down port", NULL, Format_Int8, "#0", "0", max_dport, Setting_NonCore, &plasma.port_cutter_down, NULL, is_setting_available, { .reboot_required = On } },
+    { Setting_THC_CutterUpPort, Group_AuxPorts, "Cutter up port", NULL, Format_Int8, "#0", "0", max_dport, Setting_NonCore, &plasma.port_cutter_up, NULL, is_setting_available, { .reboot_required = On } }
 };
 
 #ifndef NO_SETTINGS_DESCRIPTIONS
@@ -540,13 +560,24 @@ static void plasma_settings_load (void)
     port_cutter_up = plasma.port_cutter_up;
 
     if(ioport_can_claim_explicit()) {
-        ok = ioport_claim(Port_Analog, Port_Input, &port_arc_voltage, "Arc voltage");
+        if(n_ain >= 1)
+            ok &= ioport_claim(Port_Analog, Port_Input, &port_arc_voltage, "Arc voltage");
         ok &= ioport_claim(Port_Digital, Port_Input, &port_arc_ok, "Arc ok");
-        ok &= ioport_claim(Port_Digital, Port_Input, &port_cutter_down, "Cutter down");
-        ok &= ioport_claim(Port_Digital, Port_Input, &port_cutter_up, "Cutter up");
+        if(n_din) {
+            ok &= ioport_claim(Port_Digital, Port_Input, &port_cutter_down, "Cutter down");
+            ok &= ioport_claim(Port_Digital, Port_Input, &port_cutter_up, "Cutter up");
+        }
     }
 
     if(ok) {
+
+        if(n_ain == 0 && plasma.mode == Plasma_ModeVoltage)
+            plasma.mode = Plasma_ModeUpDown;
+
+        if(n_din < 3 && plasma.mode == Plasma_ModeUpDown)
+            plasma.mode = n_ain >= 1 ? Plasma_ModeVoltage : Plasma_ModeOff;
+
+        updown_enabled = plasma.mode == Plasma_ModeUpDown;
 
         memcpy(&port, &hal.port, sizeof(io_port_t));
         hal.port.digital_out = digital_out;
@@ -615,7 +646,7 @@ static void plasma_report_options (bool newopt)
     on_report_options(newopt);
 
     if(!newopt)
-        hal.stream.write("[PLUGIN:PLASMA v0.04]" ASCII_EOL);
+        hal.stream.write("[PLUGIN:PLASMA v0.05]" ASCII_EOL);
     else if(driver_reset) // non-null when successfully enabled
         hal.stream.write(",THC");
 }
@@ -626,19 +657,24 @@ bool plasma_init (void)
 
     n_ain = ioports_available(Port_Analog, Port_Input);
     n_din = ioports_available(Port_Digital, Port_Input);
-    ok = n_ain >= 1 && n_din >= 3;
+    ok = (n_ain >= 1 && n_din >= 1) || (n_din >= 3);
 
     if(ok) {
+
+        updown_enabled = n_ain == 0;
 
         if(!ioport_can_claim_explicit()) {
 
             // Driver does not support explicit port claiming, claim the highest numbered ports instead.
 
             if((ok = (nvs_address = nvs_alloc(sizeof(plasma_settings_t))))) {
-                plasma.port_arc_ok = --hal.port.num_analog_in;
                 plasma.port_arc_ok = --hal.port.num_digital_in;
-                plasma.port_cutter_down = --hal.port.num_digital_in;
-                plasma.port_cutter_up = --hal.port.num_digital_in;
+                if(n_din >= 3) {
+                    plasma.port_cutter_down = --hal.port.num_digital_in;
+                    plasma.port_cutter_up = --hal.port.num_digital_in;
+                }
+                if(n_ain > 0)
+                    plasma.port_arc_voltage = --hal.port.num_analog_in;
             }
 
         } else
@@ -666,6 +702,12 @@ bool plasma_init (void)
 */
 
         pidf_init(&pid, &plasma.pid);
+
+        if(n_ain == 0)
+            setting_remove_elements(Setting_THC_Mode, 0b101);
+
+        if(n_din < 3)
+            setting_remove_elements(Setting_THC_Mode, 0b011);
 
     } else
         protocol_enqueue_rt_command(plasma_warning);
