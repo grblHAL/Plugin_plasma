@@ -290,6 +290,13 @@ static void reset (void)
 // Start or stop arc
 static void arcSetState (spindle_state_t state, float rpm)
 {
+    if(driver_reset == NULL) {
+        spindle_set_state_(state, rpm);
+        if(state.on)
+            report_message("Plasma mode not available!", Message_Warning);
+        return;
+    }
+
     if (!state.on) {
         if(plasma.pause_at_end > 0.0f)
             delay_sec(plasma.pause_at_end, DelayMode_Dwell);
@@ -302,7 +309,7 @@ static void arcSetState (spindle_state_t state, float rpm)
             spindle_set_state_(state, rpm);
             thc.torch_on = On;
             report_message("arc on", Message_Plain);
-            if((thc.arc_ok = port.wait_on_input(Port_Digital, port_arc_ok, WaitMode_High, plasma.arc_fail_timeout) == 1)) {
+            if((thc.arc_ok = port.wait_on_input(Port_Digital, port_arc_ok, WaitMode_High, plasma.arc_fail_timeout) != -1)) {
                 report_message("arc ok", Message_Plain);
                 retries = 0;
                 thc_delay = hal.get_elapsed_ticks() + (uint32_t)ceilf(1000.0f * plasma.thc_delay); // handle overflow!
@@ -560,8 +567,11 @@ static void plasma_settings_load (void)
     port_cutter_up = plasma.port_cutter_up;
 
     if(ioport_can_claim_explicit()) {
-        if(n_ain >= 1)
+        if(n_ain >= 1) {
+            if(port_arc_voltage == 255)
+                plasma.port_arc_voltage = port_arc_voltage = 0;
             ok &= ioport_claim(Port_Analog, Port_Input, &port_arc_voltage, "Arc voltage");
+        }
         ok &= ioport_claim(Port_Digital, Port_Input, &port_arc_ok, "Arc ok");
         if(n_din) {
             ok &= ioport_claim(Port_Digital, Port_Input, &port_cutter_down, "Cutter down");
@@ -588,8 +598,10 @@ static void plasma_settings_load (void)
         settings_changed = hal.settings_changed;
         hal.settings_changed = plasma_setup;
 
-    } else
+    } else {
+        n_ain = n_din = 0;
         protocol_enqueue_rt_command(plasma_warning);
+    }
 }
 
 static setting_details_t setting_details = {
@@ -646,7 +658,7 @@ static void plasma_report_options (bool newopt)
     on_report_options(newopt);
 
     if(!newopt)
-        hal.stream.write("[PLUGIN:PLASMA v0.05]" ASCII_EOL);
+        hal.stream.write("[PLUGIN:PLASMA v0.06]" ASCII_EOL);
     else if(driver_reset) // non-null when successfully enabled
         hal.stream.write(",THC");
 }
@@ -683,7 +695,8 @@ bool plasma_init (void)
 
     if(ok) {
 
-        strcpy(max_aport, uitoa(n_ain - 1));
+        if(n_ain)
+            strcpy(max_aport, uitoa(n_ain - 1));
         strcpy(max_dport, uitoa(n_din - 1));
 
         settings_register(&setting_details);
