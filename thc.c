@@ -37,8 +37,6 @@
 #include "grbl/pid.h"
 #include "grbl/nvs_buffer.h"
 
-#include "thc.h"
-
 // Digital ports
 #define PLASMA_THC_DISABLE_PORT   2 // output
 #define PLASMA_TORCH_DISABLE_PORT 3 // output
@@ -570,12 +568,12 @@ static void plasma_settings_load (void)
         if(n_ain >= 1) {
             if(port_arc_voltage == 255)
                 plasma.port_arc_voltage = port_arc_voltage = 0;
-            ok &= ioport_claim(Port_Analog, Port_Input, &port_arc_voltage, "Arc voltage");
+            ok = ioport_claim(Port_Analog, Port_Input, &port_arc_voltage, "Arc voltage");
         }
-        ok &= ioport_claim(Port_Digital, Port_Input, &port_arc_ok, "Arc ok");
-        if(n_din) {
-            ok &= ioport_claim(Port_Digital, Port_Input, &port_cutter_down, "Cutter down");
-            ok &= ioport_claim(Port_Digital, Port_Input, &port_cutter_up, "Cutter up");
+        ok = ok && ioport_claim(Port_Digital, Port_Input, &port_arc_ok, "Arc ok");
+        if(ok && n_din > 1) {
+            ok = ioport_claim(Port_Digital, Port_Input, &port_cutter_down, "Cutter down");
+            ok = ok && ioport_claim(Port_Digital, Port_Input, &port_cutter_up, "Cutter up");
         }
     }
 
@@ -658,18 +656,20 @@ static void plasma_report_options (bool newopt)
     on_report_options(newopt);
 
     if(!newopt)
-        hal.stream.write("[PLUGIN:PLASMA v0.06]" ASCII_EOL);
+        hal.stream.write("[PLUGIN:PLASMA v0.07]" ASCII_EOL);
     else if(driver_reset) // non-null when successfully enabled
         hal.stream.write(",THC");
 }
 
-bool plasma_init (void)
+void plasma_init (void)
 {
     bool ok;
 
-    n_ain = ioports_available(Port_Analog, Port_Input);
-    n_din = ioports_available(Port_Digital, Port_Input);
-    ok = (n_ain >= 1 && n_din >= 1) || (n_din >= 3);
+    if((ok = hal.stepper.output_step != NULL)) {
+        n_ain = ioports_available(Port_Analog, Port_Input);
+        n_din = ioports_available(Port_Digital, Port_Input);
+        ok = (n_ain >= 1 && n_din >= 1) || (n_din >= 3);
+    }
 
     if(ok) {
 
@@ -724,8 +724,6 @@ bool plasma_init (void)
 
     } else
         protocol_enqueue_rt_command(plasma_warning);
-
-    return ok;
 }
 
 #endif
