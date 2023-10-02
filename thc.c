@@ -36,6 +36,9 @@
 #include "grbl/report.h"
 #include "grbl/pid.h"
 #include "grbl/nvs_buffer.h"
+#include "grbl/stepper2.h"
+
+#define THC_SAMPLE_AVG 5
 
 // Digital ports
 #define PLASMA_THC_DISABLE_PORT   2 // output
@@ -101,7 +104,7 @@ static bool set_feed_override = false, updown_enabled = false;
 static uint8_t n_ain, n_din;
 static uint8_t port_arc_ok, port_arc_voltage, port_cutter_down, port_cutter_up;
 static uint_fast8_t feed_override, segment_id = 0;
-static uint32_t thc_delay = 0;
+static uint32_t thc_delay = 0, v_count = 0;
 static char max_aport[4], max_dport[4];
 static float arc_vref = 0.0f, arc_voltage = 0.0f, arc_voltage_low, arc_voltage_high; //, vad_threshold;
 static float fr_pgm, fr_actual, fr_thr_99, fr_thr_vad;
@@ -111,6 +114,7 @@ static pidf_t pid;
 static nvs_address_t nvs_address;
 static char thc_modes[] = "Off,Voltage,Up/down";
 static plasma_settings_t plasma;
+static st2_motor_t *z_motor;
 static void (*volatile stateHandler)(void) = state_idle;
 
 static settings_changed_ptr settings_changed;
@@ -176,6 +180,7 @@ static void set_target_voltage (float v)
     arc_vref = arc_voltage = v;
     arc_voltage_low  = arc_vref - plasma.thc_threshold;
     arc_voltage_high = arc_vref + plasma.thc_threshold;
+    v_count = 0;
 }
 
 /* THC state machine */
@@ -223,6 +228,8 @@ static void state_vad_lock (void)
 
 static void state_thc_pid (void)
 {
+    static float v;
+
     if(!(thc.active = fr_actual >= fr_thr_vad)) {
         stateHandler = state_vad_lock;
         return;
@@ -230,21 +237,41 @@ static void state_thc_pid (void)
 
     if((thc.arc_ok = port.wait_on_input(Port_Digital, port_arc_ok, WaitMode_Immediate, 0.0f) == 1)) {
 
-        arc_voltage = (float)port.wait_on_input(Port_Analog, port_arc_voltage, WaitMode_Immediate, 0.0f) * plasma.arc_voltage_scale;
+        if(v_count == 0)
+            v = 0.0f;
 
+        arc_voltage = (float)port.wait_on_input(Port_Analog, port_arc_voltage, WaitMode_Immediate, 0.0f) * plasma.arc_voltage_scale;
+        v += arc_voltage;
+        if(++v_count == THC_SAMPLE_AVG) {
+
+            arc_voltage = v / (float)THC_SAMPLE_AVG;
+            v_count = 0;
+
+            if(arc_voltage < arc_voltage_low || arc_voltage > arc_voltage_high) {
+                float err = pidf(&pid, arc_vref, arc_voltage, 1.0f);
+                if(!st2_motor_running(z_motor)) {
+
+                    char buf[50];
+                    strcpy(buf, ftoa(arc_vref, 1));
+                    strcat(buf, ",");
+                    strcat(buf, ftoa(arc_voltage, 1));
+                    strcat(buf, ",");
+                    strcat(buf, ftoa(err, 1));
+                    report_message(buf, Message_Info);
+
+                    st2_motor_move(z_motor, -err / plasma.arc_height_per_volt, 1000.0f, Stepper2_mm);
+                }
+            }
+        }
+/*
         if(arc_voltage >= arc_voltage_high)
             hal.stepper.output_step((axes_signals_t){Z_AXIS_BIT}, (axes_signals_t){Z_AXIS_BIT});
         else if(arc_voltage <= arc_voltage_low)
             hal.stepper.output_step((axes_signals_t){Z_AXIS_BIT}, (axes_signals_t){0});
+*/
 
     } else
         pause_on_error();
-/*
-    if(arc_voltage < arc_voltage_low || arc_voltage > arc_voltage_high) {
-        float err = pidf(&pid, arc_vref, arc_voltage, 1.0f);
-        // Move Z
-    }
-    */
 }
 
 /* end THC state machine */
@@ -259,6 +286,9 @@ void onExecuteRealtime (uint_fast16_t state)
         last_ms = ms;
         stateHandler();
     }
+
+    if(stateHandler == state_thc_pid)
+        st2_motor_run(z_motor);
 
     if(set_feed_override) {
         set_feed_override = false;
@@ -281,6 +311,8 @@ static void reset (void)
 {
     thc.value = 0;
     stateHandler = state_idle;
+
+    st2_motor_stop(z_motor);
 
     driver_reset();
 }
@@ -493,10 +525,10 @@ static const setting_descr_t plasma_settings_descr[] = {
     { Setting_Arc_RetryDelay, "The time between an arc failure and another arc start attempt." },
     { Setting_Arc_MaxRetries, "The number of attempts at starting an arc." },
     { Setting_Arc_VoltageScale, "The value required to scale the arc voltage input to display the correct arc voltage." },
-    { Setting_Arc_VoltageOffset, "The value required to display zero volts when there is zero arc voltage input.\n"
+    { Setting_Arc_VoltageOffset, "The value required to display zero volts when there is zero arc voltage input.\\n"
                                  "For initial setup multiply the arc voltage out value by -1 and enter that for Voltage Offset."
     },
-    { Setting_Arc_HeightPerVolt, "The distance the torch would need to move to change the arc voltage by one volt.\n"
+    { Setting_Arc_HeightPerVolt, "The distance the torch would need to move to change the arc voltage by one volt.\\n"
                                  "Used for manual height change only."
     },
     { Setting_Arc_OkHighVoltage, "High voltage threshold for Arc OK." },
@@ -533,7 +565,7 @@ static void plasma_settings_restore (void)
     plasma.arc_height_per_volt = 0.1f;
     plasma.arc_high_low_voltage = 150.0;
     plasma.arc_ok_low_voltage = 100.0f;
-    plasma.pid.p_gain = 25.0f;
+    plasma.pid.p_gain = 1.0f;
     plasma.pid.i_gain = 0.0f;
     plasma.pid.d_gain = 0.0f;
 
@@ -602,6 +634,11 @@ static void plasma_settings_load (void)
     }
 }
 
+static void on_settings_changed (settings_t *settings, settings_changed_flags_t changed)
+{
+    pidf_init(&pid, &plasma.pid);
+}
+
 static setting_details_t setting_details = {
     .groups = plasma_groups,
     .n_groups = sizeof(plasma_groups) / sizeof(setting_group_detail_t),
@@ -613,13 +650,13 @@ static setting_details_t setting_details = {
 #endif
     .save = plasma_settings_save,
     .load = plasma_settings_load,
-    .restore = plasma_settings_restore
+    .restore = plasma_settings_restore,
+    .on_changed = on_settings_changed
 };
 
 static void enumeratePins (bool low_level, pin_info_ptr pin_info, void *data)
 {
     enumerate_pins(low_level, pin_info, data);
-
 
     /*    static xbar_t pin = {0};
 
@@ -693,7 +730,7 @@ void plasma_init (void)
             ok = (nvs_address = nvs_alloc(sizeof(plasma_settings_t)));
     }
 
-    if(ok) {
+    if(ok && (z_motor = st2_motor_init(Z_AXIS)) != NULL) {
 
         if(n_ain)
             strcpy(max_aport, uitoa(n_ain - 1));
@@ -713,8 +750,6 @@ void plasma_init (void)
         control_interrupt_callback = hal.control_interrupt_callback;
         hal.control_interrupt_callback = trap_control_interrupts;
 */
-
-        pidf_init(&pid, &plasma.pid);
 
         if(n_ain == 0)
             setting_remove_elements(Setting_THC_Mode, 0b101);
