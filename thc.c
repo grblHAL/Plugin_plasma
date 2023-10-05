@@ -250,7 +250,7 @@ static void state_thc_pid (void)
             if(arc_voltage < arc_voltage_low || arc_voltage > arc_voltage_high) {
                 float err = pidf(&pid, arc_vref, arc_voltage, 1.0f);
                 if(!st2_motor_running(z_motor)) {
-
+/*
                     char buf[50];
                     strcpy(buf, ftoa(arc_vref, 1));
                     strcat(buf, ",");
@@ -258,8 +258,8 @@ static void state_thc_pid (void)
                     strcat(buf, ",");
                     strcat(buf, ftoa(err, 1));
                     report_message(buf, Message_Info);
-
-                    st2_motor_move(z_motor, -err / plasma.arc_height_per_volt, 1000.0f, Stepper2_mm);
+*/
+                    st2_motor_move(z_motor, -err / plasma.arc_height_per_volt, settings.axis[Z_AXIS].max_rate, Stepper2_mm);
                 }
             }
         }
@@ -276,7 +276,7 @@ static void state_thc_pid (void)
 
 /* end THC state machine */
 
-void onExecuteRealtime (uint_fast16_t state)
+static void onExecuteRealtime (uint_fast16_t state)
 {
     static uint32_t last_ms;
 
@@ -361,10 +361,10 @@ static void arcSetState (spindle_state_t state, float rpm)
 
 static void stepperPulseStart (stepper_t *stepper)
 {
-    static volatile bool get_rates = false;
+//    static volatile bool get_rates = false;
 
     if(stepper->new_block) {
-        get_rates = true;
+//        get_rates = true;
         fr_pgm = stepper->exec_block->programmed_rate * 0.01f * sys.override.feed_rate;
         fr_thr_99 = fr_pgm * 0.99f;
         fr_thr_vad = fr_pgm * 0.01f * (float)plasma.vad_threshold;
@@ -693,7 +693,7 @@ static void plasma_report_options (bool newopt)
     on_report_options(newopt);
 
     if(!newopt)
-        hal.stream.write("[PLUGIN:PLASMA v0.07]" ASCII_EOL);
+        hal.stream.write("[PLUGIN:PLASMA v0.08]" ASCII_EOL);
     else if(driver_reset) // non-null when successfully enabled
         hal.stream.write(",THC");
 }
