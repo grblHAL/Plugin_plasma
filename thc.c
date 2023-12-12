@@ -259,7 +259,7 @@ static void state_thc_pid (void)
                     strcat(buf, ftoa(err, 1));
                     report_message(buf, Message_Info);
 */
-                    st2_motor_move(z_motor, -err / plasma.arc_height_per_volt, settings.axis[Z_AXIS].max_rate, Stepper2_mm);
+                    st2_motor_move(z_motor, -err * plasma.arc_height_per_volt, settings.axis[Z_AXIS].max_rate, Stepper2_mm);
                 }
             }
         }
@@ -318,25 +318,25 @@ static void reset (void)
 }
 
 // Start or stop arc
-static void arcSetState (spindle_state_t state, float rpm)
+static void arcSetState (spindle_ptrs_t *spindle, spindle_state_t state, float rpm)
 {
     if(driver_reset == NULL) {
-        spindle_set_state_(state, rpm);
+        spindle_set_state_(spindle, state, rpm);
         if(state.on)
             report_message("Plasma mode not available!", Message_Warning);
         return;
     }
 
-    if (!state.on) {
+    if(!state.on) {
         if(plasma.pause_at_end > 0.0f)
             delay_sec(plasma.pause_at_end, DelayMode_Dwell);
-        spindle_set_state_(state, rpm);
+        spindle_set_state_(spindle, state, rpm);
         thc.torch_on = thc.arc_ok = thc.enabled = Off;
         stateHandler = state_idle;
     } else {
         uint_fast8_t retries = plasma.arc_retries;
         do {
-            spindle_set_state_(state, rpm);
+            spindle_set_state_(spindle, state, rpm);
             thc.torch_on = On;
             report_message("arc on", Message_Plain);
             if((thc.arc_ok = port.wait_on_input(Port_Digital, port_arc_ok, WaitMode_High, plasma.arc_fail_timeout) != -1)) {
@@ -347,12 +347,12 @@ static void arcSetState (spindle_state_t state, float rpm)
             } else if(!(--retries)) {
                 thc.torch_on = Off;
                 report_message("arc failed", Message_Warning);
-                spindle_set_state_((spindle_state_t){0}, 0.0f);
+                spindle_set_state_(spindle, (spindle_state_t){0}, 0.0f);
                 pause_on_error(); // output message and enter similar state as tool change state (allow jogging before resume)
             } else {
                 thc.torch_on = Off;
                 report_message("arc delay", Message_Plain);
-                spindle_set_state_((spindle_state_t){0}, 0.0f);
+                spindle_set_state_(spindle, (spindle_state_t){0}, 0.0f);
                 delay_sec(plasma.arc_retry_delay, DelayMode_Dwell);
             }
         } while(retries);
@@ -529,7 +529,7 @@ static const setting_descr_t plasma_settings_descr[] = {
                                  "For initial setup multiply the arc voltage out value by -1 and enter that for Voltage Offset."
     },
     { Setting_Arc_HeightPerVolt, "The distance the torch would need to move to change the arc voltage by one volt.\\n"
-                                 "Used for manual height change only."
+//                                 "Used for manual height change only."
     },
     { Setting_Arc_OkHighVoltage, "High voltage threshold for Arc OK." },
     { Setting_Arc_OkLowVoltage, "Low voltage threshold for Arc OK." },
@@ -570,10 +570,14 @@ static void plasma_settings_restore (void)
     plasma.pid.d_gain = 0.0f;
 
     if(ioport_can_claim_explicit()) {
+
+        n_ain = ioports_available(Port_Analog, Port_Input);
+        n_din = ioports_available(Port_Digital, Port_Input);
+
         plasma.port_arc_voltage = n_ain - 1;
         plasma.port_arc_ok = n_din - 1;
-        plasma.port_cutter_down = n_din - 2;
-        plasma.port_cutter_up = n_din - 3;
+        plasma.port_cutter_down = updown_enabled ? n_din - 2 : 255;
+        plasma.port_cutter_up = updown_enabled ? n_din - 3 : 255;
     }
 
     hal.nvs.memcpy_to_nvs(nvs_address, (uint8_t *)&plasma, sizeof(plasma_settings_t), true);
@@ -693,7 +697,7 @@ static void plasma_report_options (bool newopt)
     on_report_options(newopt);
 
     if(!newopt)
-        hal.stream.write("[PLUGIN:PLASMA v0.08]" ASCII_EOL);
+        hal.stream.write("[PLUGIN:PLASMA v0.11]" ASCII_EOL);
     else if(driver_reset) // non-null when successfully enabled
         hal.stream.write(",THC");
 }
@@ -730,7 +734,7 @@ void plasma_init (void)
             ok = (nvs_address = nvs_alloc(sizeof(plasma_settings_t)));
     }
 
-    if(ok && (z_motor = st2_motor_init(Z_AXIS)) != NULL) {
+    if(ok && (z_motor = st2_motor_init(Z_AXIS, false)) != NULL) {
 
         if(n_ain)
             strcpy(max_aport, uitoa(n_ain - 1));
