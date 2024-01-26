@@ -4,7 +4,7 @@
 
   Part of grblHAL
 
-  Copyright (c) 2020-2023 Terje Io
+  Copyright (c) 2020-2024 Terje Io
 
   Grbl is free software: you can redistribute it and/or modify
   it under the terms of the GNU General Public License as published by
@@ -583,11 +583,6 @@ static void plasma_settings_restore (void)
     hal.nvs.memcpy_to_nvs(nvs_address, (uint8_t *)&plasma, sizeof(plasma_settings_t), true);
 }
 
-static void plasma_warning (uint_fast16_t state)
-{
-    report_message("Plasma mode failed to initialize!", Message_Warning);
-}
-
 static void plasma_settings_load (void)
 {
     bool ok = true;
@@ -634,7 +629,7 @@ static void plasma_settings_load (void)
 
     } else {
         n_ain = n_din = 0;
-        protocol_enqueue_rt_command(plasma_warning);
+        protocol_enqueue_foreground_task(report_warning, "Plasma mode failed to initialize!");
     }
 }
 
@@ -697,7 +692,7 @@ static void plasma_report_options (bool newopt)
     on_report_options(newopt);
 
     if(!newopt)
-        hal.stream.write("[PLUGIN:PLASMA v0.11]" ASCII_EOL);
+        hal.stream.write("[PLUGIN:PLASMA v0.12]" ASCII_EOL);
     else if(driver_reset) // non-null when successfully enabled
         hal.stream.write(",THC");
 }
@@ -762,7 +757,7 @@ void plasma_init (void)
             setting_remove_elements(Setting_THC_Mode, 0b011);
 
     } else
-        protocol_enqueue_rt_command(plasma_warning);
+        protocol_enqueue_foreground_task(report_warning, "Plasma mode failed to initialize!");
 }
 
 #endif
