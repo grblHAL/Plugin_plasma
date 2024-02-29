@@ -100,7 +100,7 @@ static void state_thc_pid (void);
 static void state_thc_adjust (void);
 static void state_vad_lock (void);
 
-static bool set_feed_override = false, updown_enabled = false;
+static bool set_feed_override = false, updown_enabled = false, init_ok = false;
 static uint8_t n_ain, n_din;
 static uint8_t port_arc_ok, port_arc_voltage, port_cutter_down, port_cutter_up;
 static uint_fast8_t feed_override, segment_id = 0;
@@ -479,8 +479,16 @@ static bool is_setting_available (const setting_detail_t *setting)
             ok = n_din >= 3;
             break;
 
-        default:
+        case Setting_Arc_VoltagePort:
             ok = n_ain >= 1;
+            break;
+
+        case Setting_THC_VADThreshold:
+            ok = init_ok;
+            break;
+
+        default:
+            ok = init_ok && plasma.mode == Plasma_ModeVoltage;
             break;
     }
 
@@ -546,9 +554,38 @@ static void plasma_settings_save (void)
     hal.nvs.memcpy_to_nvs(nvs_address, (uint8_t *)&plasma, sizeof(plasma_settings_t), true);
 }
 
+static uint8_t ioport_find_free (io_port_type_t type, io_port_direction_t dir, char *description)
+{
+    uint8_t port;
+    bool found = false;
+    xbar_t *pin;
+
+    if(description) {
+        port = ioports_available(type, dir);
+        do {
+            if((pin = hal.port.get_pin_info(type, dir, --port))) {
+                if((found = pin->description && !strcmp(pin->description, description)))
+                    port = pin->id;
+            }
+        } while(port && !found);
+    }
+
+    if(!found) {
+        port = ioports_available(type, dir);
+        do {
+            if((pin = hal.port.get_pin_info(type, dir, --port))) {
+                if((found = !pin->mode.claimed))
+                    port = pin->id;
+            }
+        } while(port && !found);
+    }
+
+    return found ? port : 255;
+}
+
 static void plasma_settings_restore (void)
 {
-    plasma.mode = updown_enabled ? Plasma_ModeUpDown :  Plasma_ModeVoltage;
+    plasma.mode = updown_enabled ? Plasma_ModeUpDown : Plasma_ModeVoltage;
     plasma.thc_delay = 3.0f;
     plasma.thc_threshold = 1.0f;
     plasma.thc_override = 100;
@@ -570,14 +607,10 @@ static void plasma_settings_restore (void)
     plasma.pid.d_gain = 0.0f;
 
     if(ioport_can_claim_explicit()) {
-
-        n_ain = ioports_available(Port_Analog, Port_Input);
-        n_din = ioports_available(Port_Digital, Port_Input);
-
-        plasma.port_arc_voltage = n_ain - 1;
-        plasma.port_arc_ok = n_din - 1;
-        plasma.port_cutter_down = updown_enabled ? n_din - 2 : 255;
-        plasma.port_cutter_up = updown_enabled ? n_din - 3 : 255;
+        plasma.port_arc_voltage = ioport_find_free(Port_Analog, Port_Input, "Arc voltage");
+        plasma.port_arc_ok = ioport_find_free(Port_Digital, Port_Input, "Arc ok");
+        plasma.port_cutter_down = updown_enabled && plasma.port_arc_ok >= 1 ? plasma.port_arc_ok - 1 : 255;
+        plasma.port_cutter_up = updown_enabled && plasma.port_arc_ok >= 2 ? plasma.port_arc_ok - 2 : 255;
     }
 
     hal.nvs.memcpy_to_nvs(nvs_address, (uint8_t *)&plasma, sizeof(plasma_settings_t), true);
@@ -585,10 +618,12 @@ static void plasma_settings_restore (void)
 
 static void plasma_settings_load (void)
 {
-    bool ok = true;
+    init_ok = true;
 
-    if(hal.nvs.memcpy_from_nvs((uint8_t *)&plasma, nvs_address, sizeof(plasma_settings_t), true) != NVS_TransferResult_OK)
+    if(hal.nvs.memcpy_from_nvs((uint8_t *)&plasma, nvs_address, sizeof(plasma_settings_t), true) != NVS_TransferResult_OK) {
+        plasma.port_arc_ok = plasma.port_cutter_down = plasma.port_cutter_up = 255;
         plasma_settings_restore();
+    }
 
     port_arc_voltage = plasma.port_arc_voltage;
     port_arc_ok = plasma.port_arc_ok;
@@ -599,16 +634,16 @@ static void plasma_settings_load (void)
         if(n_ain >= 1) {
             if(port_arc_voltage == 255)
                 plasma.port_arc_voltage = port_arc_voltage = 0;
-            ok = ioport_claim(Port_Analog, Port_Input, &port_arc_voltage, "Arc voltage");
+            init_ok = ioport_claim(Port_Analog, Port_Input, &port_arc_voltage, "Arc voltage");
         }
-        ok = ok && ioport_claim(Port_Digital, Port_Input, &port_arc_ok, "Arc ok");
-        if(ok && n_din > 1) {
-            ok = ioport_claim(Port_Digital, Port_Input, &port_cutter_down, "Cutter down");
-            ok = ok && ioport_claim(Port_Digital, Port_Input, &port_cutter_up, "Cutter up");
+        init_ok = init_ok && ioport_claim(Port_Digital, Port_Input, &port_arc_ok, "Arc ok");
+        if(init_ok && n_din > 2 && port_cutter_down != 255) {
+            init_ok = ioport_claim(Port_Digital, Port_Input, &port_cutter_down, "Cutter down");
+            init_ok = init_ok && ioport_claim(Port_Digital, Port_Input, &port_cutter_up, "Cutter up");
         }
     }
 
-    if(ok) {
+    if(init_ok) {
 
         if(n_ain == 0 && plasma.mode == Plasma_ModeVoltage)
             plasma.mode = Plasma_ModeUpDown;
@@ -627,10 +662,8 @@ static void plasma_settings_load (void)
         settings_changed = hal.settings_changed;
         hal.settings_changed = plasma_setup;
 
-    } else {
-        n_ain = n_din = 0;
+    } else
         protocol_enqueue_foreground_task(report_warning, "Plasma mode failed to initialize!");
-    }
 }
 
 static void on_settings_changed (settings_t *settings, settings_changed_flags_t changed)
@@ -692,7 +725,7 @@ static void plasma_report_options (bool newopt)
     on_report_options(newopt);
 
     if(!newopt)
-        hal.stream.write("[PLUGIN:PLASMA v0.12]" ASCII_EOL);
+        hal.stream.write("[PLUGIN:PLASMA v0.13]" ASCII_EOL);
     else if(driver_reset) // non-null when successfully enabled
         hal.stream.write(",THC");
 }
