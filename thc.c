@@ -720,7 +720,7 @@ static void enumeratePins (bool low_level, pin_info_ptr pin_info, void *data)
 
 }
 
-static void plasma_report_options (bool newopt)
+static void onReportOptions (bool newopt)
 {
     on_report_options(newopt);
 
@@ -771,7 +771,7 @@ void plasma_init (void)
         settings_register(&setting_details);
 
         on_report_options = grbl.on_report_options;
-        grbl.on_report_options = plasma_report_options;
+        grbl.on_report_options = onReportOptions;
 
         on_spindle_selected = grbl.on_spindle_selected;
         grbl.on_spindle_selected = onSpindleSelected;
