@@ -554,35 +554,6 @@ static void plasma_settings_save (void)
     hal.nvs.memcpy_to_nvs(nvs_address, (uint8_t *)&plasma, sizeof(plasma_settings_t), true);
 }
 
-static uint8_t ioport_find_free (io_port_type_t type, io_port_direction_t dir, char *description)
-{
-    uint8_t port;
-    bool found = false;
-    xbar_t *pin;
-
-    if(description) {
-        port = ioports_available(type, dir);
-        do {
-            if((pin = hal.port.get_pin_info(type, dir, --port))) {
-                if((found = pin->description && !strcmp(pin->description, description)))
-                    port = pin->id;
-            }
-        } while(port && !found);
-    }
-
-    if(!found) {
-        port = ioports_available(type, dir);
-        do {
-            if((pin = hal.port.get_pin_info(type, dir, --port))) {
-                if((found = !pin->mode.claimed))
-                    port = pin->id;
-            }
-        } while(port && !found);
-    }
-
-    return found ? port : 255;
-}
-
 static void plasma_settings_restore (void)
 {
     plasma.mode = updown_enabled ? Plasma_ModeUpDown : Plasma_ModeVoltage;
