@@ -187,7 +187,7 @@ static void set_target_voltage (float v)
 
 static void state_idle (void)
 {
-    arc_voltage = (float)port.wait_on_input(Port_Analog, port_arc_voltage, WaitMode_Immediate, 0.0f) * plasma.arc_voltage_scale;
+    arc_voltage = ((float)port.wait_on_input(Port_Analog, port_arc_voltage, WaitMode_Immediate, 0.0f) * plasma.arc_voltage_scale) - plasma.arc_voltage_offset;
 }
 
 static void state_thc_delay (void)
@@ -198,7 +198,7 @@ static void state_thc_delay (void)
             stateHandler = state_thc_adjust;
         else {
             pidf_reset(&pid);
-            set_target_voltage((float)port.wait_on_input(Port_Analog, port_arc_voltage, WaitMode_Immediate, 0.0f) * plasma.arc_voltage_scale);
+            set_target_voltage(((float)port.wait_on_input(Port_Analog, port_arc_voltage, WaitMode_Immediate, 0.0f) * plasma.arc_voltage_scale) - plasma.arc_voltage_offset);
             stateHandler = state_vad_lock;
             stateHandler();
         }
@@ -220,7 +220,7 @@ static void state_thc_adjust (void)
 
 static void state_vad_lock (void)
 {
-    arc_voltage = (float)port.wait_on_input(Port_Analog, port_arc_voltage, WaitMode_Immediate, 0.0f) * plasma.arc_voltage_scale;
+    arc_voltage = ((float)port.wait_on_input(Port_Analog, port_arc_voltage, WaitMode_Immediate, 0.0f) * plasma.arc_voltage_scale) - plasma.arc_voltage_offset;
 
     if((thc.active = fr_actual >= fr_thr_99))
         stateHandler = state_thc_pid;
@@ -240,7 +240,7 @@ static void state_thc_pid (void)
         if(v_count == 0)
             v = 0.0f;
 
-        arc_voltage = (float)port.wait_on_input(Port_Analog, port_arc_voltage, WaitMode_Immediate, 0.0f) * plasma.arc_voltage_scale;
+        arc_voltage = ((float)port.wait_on_input(Port_Analog, port_arc_voltage, WaitMode_Immediate, 0.0f) * plasma.arc_voltage_scale) - plasma.arc_voltage_offset;
         v += arc_voltage;
         if(++v_count == THC_SAMPLE_AVG) {
 
