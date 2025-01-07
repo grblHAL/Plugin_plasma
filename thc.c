@@ -4,20 +4,20 @@
 
   Part of grblHAL
 
-  Copyright (c) 2020-2024 Terje Io
+  Copyright (c) 2020-2025 Terje Io
 
-  Grbl is free software: you can redistribute it and/or modify
+  grblHAL is free software: you can redistribute it and/or modify
   it under the terms of the GNU General Public License as published by
   the Free Software Foundation, either version 3 of the License, or
   (at your option) any later version.
 
-  Grbl is distributed in the hope that it will be useful,
+  grblHAL is distributed in the hope that it will be useful,
   but WITHOUT ANY WARRANTY; without even the implied warranty of
-  MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
+  MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE. See the
   GNU General Public License for more details.
 
   You should have received a copy of the GNU General Public License
-  along with Grbl.  If not, see <http://www.gnu.org/licenses/>.
+  along with grblHAL. If not, see <http://www.gnu.org/licenses/>.
 
 */
 
@@ -642,21 +642,6 @@ static void on_settings_changed (settings_t *settings, settings_changed_flags_t 
     pidf_init(&pid, &plasma.pid);
 }
 
-static setting_details_t setting_details = {
-    .groups = plasma_groups,
-    .n_groups = sizeof(plasma_groups) / sizeof(setting_group_detail_t),
-    .settings = plasma_settings,
-    .n_settings = sizeof(plasma_settings) / sizeof(setting_detail_t),
-#ifndef NO_SETTINGS_DESCRIPTIONS
-    .descriptions = plasma_settings_descr,
-    .n_descriptions = sizeof(plasma_settings_descr) / sizeof(setting_descr_t),
-#endif
-    .save = plasma_settings_save,
-    .load = plasma_settings_load,
-    .restore = plasma_settings_restore,
-    .on_changed = on_settings_changed
-};
-
 static void enumeratePins (bool low_level, pin_info_ptr pin_info, void *data)
 {
     enumerate_pins(low_level, pin_info, data);
@@ -696,13 +681,28 @@ static void onReportOptions (bool newopt)
     on_report_options(newopt);
 
     if(!newopt)
-        hal.stream.write("[PLUGIN:PLASMA v0.13]" ASCII_EOL);
+        report_plugin("PLASMA", "0.14");
     else if(driver_reset) // non-null when successfully enabled
         hal.stream.write(",THC");
 }
 
 void plasma_init (void)
 {
+    static setting_details_t setting_details = {
+        .groups = plasma_groups,
+        .n_groups = sizeof(plasma_groups) / sizeof(setting_group_detail_t),
+        .settings = plasma_settings,
+        .n_settings = sizeof(plasma_settings) / sizeof(setting_detail_t),
+    #ifndef NO_SETTINGS_DESCRIPTIONS
+        .descriptions = plasma_settings_descr,
+        .n_descriptions = sizeof(plasma_settings_descr) / sizeof(setting_descr_t),
+    #endif
+        .save = plasma_settings_save,
+        .load = plasma_settings_load,
+        .restore = plasma_settings_restore,
+        .on_changed = on_settings_changed
+    };
+
     bool ok;
 
     if((ok = hal.stepper.output_step != NULL)) {
@@ -764,4 +764,4 @@ void plasma_init (void)
         protocol_enqueue_foreground_task(report_warning, "Plasma mode failed to initialize!");
 }
 
-#endif
+#endif // PLASMA_ENABLE
