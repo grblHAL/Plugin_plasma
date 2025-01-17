@@ -52,6 +52,16 @@ typedef enum {
     Plasma_ModeUpDown = 2
 } plasma_mode_t;
 
+typedef union {
+    uint8_t flags;
+    struct {
+        uint8_t virtual_ports :1,
+                sync_pos      :1,
+                onoffmode     :1,
+                unassigned    :5;
+    };
+} thc_options_t;
+
 typedef struct {
     float thc_delay;
     float thc_threshold;
@@ -67,7 +77,10 @@ typedef struct {
     float arc_height_per_volt;
     float arc_ok_low_voltage;
     float arc_high_low_voltage;
-    uint_fast8_t arc_retries;
+    uint8_t arc_retries;
+    thc_options_t option;
+    uint8_t unused1;
+    uint8_t unused2;
     plasma_mode_t mode;
     pid_values_t pid;
     uint8_t port_arc_voltage;
@@ -77,6 +90,7 @@ typedef struct {
 } plasma_settings_t;
 
 typedef union {
+    uint16_t bits;
     uint16_t value;
     struct {
         uint16_t arc_ok        :1,
@@ -107,6 +121,7 @@ static uint8_t n_ain, n_din;
 static uint8_t port_arc_ok, port_arc_voltage;
 static uint_fast8_t feed_override, segment_id = 0;
 static uint32_t thc_delay = 0, v_count = 0;
+static int32_t step_count;
 static char max_aport[4], max_dport[4];
 static float arc_vref = 0.0f, arc_voltage = 0.0f, arc_voltage_low, arc_voltage_high; //, vad_threshold;
 static float fr_pgm, fr_actual, fr_thr_99, fr_thr_vad;
@@ -130,51 +145,125 @@ static on_spindle_selected_ptr on_spindle_selected;
 static on_execute_realtime_ptr on_execute_realtime = NULL;
 static on_realtime_report_ptr on_realtime_report = NULL;
 
-// ---
+// --- Virtual ports start
 
 static io_port_t rport = {0};
 static io_ports_data_t digital, analog;
 
+typedef struct {
+    uint8_t pin_id;
+    pin_info_ptr pin_info;
+    void *data;
+    bool aux_dout0;
+    bool aux_dout1;
+    bool aux_aout0;
+    bool aux_aout1;
+    bool aux_aout2;
+} pin_stat_t;
+
+static void enum_trap (xbar_t *pin, void *data)
+{
+    ((pin_stat_t *)data)->pin_id = max(((pin_stat_t *)data)->pin_id, pin->id);
+
+    if(pin->function == Output_Aux0)
+        ((pin_stat_t *)data)->aux_dout0 = true;
+    else if(pin->function == Output_Aux1)
+        ((pin_stat_t *)data)->aux_dout1 = true;
+    else if(pin->function == Output_Analog_Aux0)
+        ((pin_stat_t *)data)->aux_aout0 = true;
+    else if(pin->function == Output_Analog_Aux1)
+        ((pin_stat_t *)data)->aux_aout1 = true;
+    else if(pin->function == Output_Analog_Aux2)
+        ((pin_stat_t *)data)->aux_aout2 = true;
+
+    if((pin->function == Output_Aux2 || pin->function == Output_Aux3 || pin->function == Output_Analog_Aux3))
+        pin->description = "Shadowed by THC";
+
+    if(((pin_stat_t *)data)->pin_info)
+        ((pin_stat_t *)data)->pin_info(pin, ((pin_stat_t *)data)->data);
+}
+
 static void enumeratePins (bool low_level, pin_info_ptr pin_info, void *data)
 {
-    enumerate_pins(low_level, pin_info, data);
-
-    // trap pin_info callback to get highest used id?
+    pin_stat_t pin_stat = {
+        .pin_id = 0,
+        .pin_info = pin_info,
+        .data = data
+    };
 
     static xbar_t pin = {
         .id = 0,
         .pin = 0,
         .group = PinGroup_Virtual,
         .function = Virtual_Pin,
+        .cap.claimable = Off,
         .mode.output = On,
         .mode.claimed = On
     };
 
+    enumerate_pins(low_level, enum_trap, &pin_stat);
+
+    if(!pin_stat.aux_dout0) {
+        pin.id = ++pin_stat.pin_id;
+        pin.description = "P0,Dummy out";
+        pin_info(&pin, data);
+    }
+
+    if(!pin_stat.aux_dout1) {
+        pin.id = ++pin_stat.pin_id;
+        pin.description = "P1,Dummy out";
+        pin_info(&pin, data);
+    }
+
+    pin.id = ++pin_stat.pin_id;
     pin.port = "THCD",
-    pin.description = "THC on/off";
+    pin.description = "P2,THC on/off";
     pin_info(&pin, data);
 
-    pin.id++;
+    pin.id = ++pin_stat.pin_id;
     pin.pin++;
-    pin.description = "THC torch control";
+    pin.description = "P3,THC torch control";
     pin_info(&pin, data);
 
-    pin.id++;
     pin.pin = 0;
-    pin.port = "THCA",
+    pin.port = "THCA";
     pin.mode.analog = On;
-    pin.description = "THC feed override";
+
+    if(!pin_stat.aux_aout0) {
+        pin.id = ++pin_stat.pin_id;
+        pin.description = "E0,Dummy out";
+        pin_info(&pin, data);
+        pin.pin++;
+    }
+
+    if(!pin_stat.aux_aout1) {
+        pin.id = ++pin_stat.pin_id;
+        pin.description = "E1,Dummy out";
+        pin_info(&pin, data);
+        pin.pin++;
+    }
+
+    if(!pin_stat.aux_aout1) {
+        pin.id = ++pin_stat.pin_id;
+        pin.description = "E2,Dummy out";
+        pin_info(&pin, data);
+        pin.pin++;
+    }
+
+    pin.id = ++pin_stat.pin_id;
+    pin.port = "THCA";
+    pin.description = "E3,THC feed override";
     pin_info(&pin, data);
 }
 
 static void digital_out (uint8_t portnum, bool on)
 {
-    if(portnum == digital.out.n_start) {
+    if(portnum == PLASMA_THC_DISABLE_PORT) {
         if(!(thc.enabled = !on))
             stateHandler = state_idle;
         else if(thc.arc_ok)
             stateHandler = plasma.mode == Plasma_ModeUpDown ? state_thc_adjust : state_thc_pid;
-    } else if(portnum == digital.out.n_start + 1) {
+    } else if(portnum == PLASMA_TORCH_DISABLE_PORT) {
         // PLASMA_TORCH_DISABLE_PORT:
         // TODO
     } else if(rport.digital_out)
@@ -183,7 +272,7 @@ static void digital_out (uint8_t portnum, bool on)
 
 static bool analog_out (uint8_t portnum, float value)
 {
-    if(portnum == analog.out.n_start) {
+    if(portnum == PLASMA_FEED_OVERRIDE_PORT) {
         // Let the foreground process handle this
         set_feed_override = true;
         feed_override = (uint_fast8_t)value;
@@ -210,7 +299,7 @@ static xbar_t *get_pin_info (io_port_type_t type, io_port_direction_t dir, uint8
             pin.id = pin.pin = port;
             pin.cap.output = On;
             pin.cap.claimable = Off;
-            pin.mode.output = pin.mode.claimed = On;
+            pin.mode.output = On;
             pin.description = port == digital.out.n_start ? "THC enable/disable" : "THC torch control";
 
             return &pin;
@@ -223,7 +312,7 @@ static xbar_t *get_pin_info (io_port_type_t type, io_port_direction_t dir, uint8
             pin.id = pin.pin = port;
             pin.cap.output = pin.cap.analog = On;
             pin.cap.claimable = Off;
-            pin.mode.output = pin.mode.claimed = pin.cap.analog = On;
+            pin.mode.output = pin.cap.analog = On;
             pin.description = "THC feed override";
 
             return &pin;
@@ -235,7 +324,24 @@ static xbar_t *get_pin_info (io_port_type_t type, io_port_direction_t dir, uint8
 
 static void add_virtual_ports (void *data)
 {
-    if(ioports_add(&digital, Port_Digital, 0, 2) && ioports_add(&analog, Port_Analog, 0, 1))  {
+    uint8_t aux_dout = 2, aux_aout = 1;
+    pin_stat_t pin_stat = {};
+
+    if(hal.enumerate_pins)
+        hal.enumerate_pins(false, enum_trap, &pin_stat);
+
+    if(!pin_stat.aux_dout0)
+        aux_dout++;
+    if(!pin_stat.aux_dout1)
+        aux_dout++;
+    if(!pin_stat.aux_aout0)
+        aux_aout++;
+    if(!pin_stat.aux_aout1)
+        aux_aout++;
+    if(!pin_stat.aux_aout2)
+        aux_aout++;
+
+    if(ioports_add(&digital, Port_Digital, 0, aux_dout) && ioports_add(&analog, Port_Analog, 0, aux_aout))  {
 
         memcpy(&rport, &hal.port, sizeof(io_port_t));
 
@@ -248,7 +354,7 @@ static void add_virtual_ports (void *data)
     }
 }
 
-// ---
+// --- Virtual ports end
 
 static void set_target_voltage (float v)
 {
@@ -272,16 +378,31 @@ static void state_idle (void)
 {
     if(plasma.mode == Plasma_ModeVoltage)
         arc_voltage = parc_voltage.get_value(&parc_voltage) * plasma.arc_voltage_scale - plasma.arc_voltage_offset;
+
+    if(plasma.option.sync_pos && state_get() == STATE_IDLE) {
+
+        if(plasma.mode != Plasma_ModeUpDown)
+            step_count =(uint32_t)st2_get_position(z_motor);
+
+        if(step_count && state_get() == STATE_IDLE) {
+            sys.position[Z_AXIS] += step_count;
+            step_count = 0;
+            st2_set_position(z_motor, 0LL);
+            sync_position();
+        }
+    }
 }
 
 static void state_thc_delay (void)
 {
     if(hal.get_elapsed_ticks() >= thc_delay) {
         thc.enabled = On;
-        if(plasma.mode == Plasma_ModeUpDown)
+        if(plasma.mode == Plasma_ModeUpDown) {
+            step_count = 0;
             stateHandler = state_thc_adjust;
-        else {
+        } else {
             pidf_reset(&pid);
+            st2_set_position(z_motor, 0LL);
             set_target_voltage(parc_voltage.get_value(&parc_voltage) * plasma.arc_voltage_scale - plasma.arc_voltage_offset);
             stateHandler = state_vad_lock;
             stateHandler();
@@ -296,10 +417,13 @@ static void state_thc_adjust (void)
             thc.up = thc.report_up = cutter_up.get_value(&cutter_up) == 1.0f;
             thc.down = thc.report_down = cutter_down.get_value(&cutter_down) == 1.0f;
             if(thc.up != thc.down) {
-                if(thc.up)
+                if(thc.up) {
+                    step_count++;
                     hal.stepper.output_step((axes_signals_t){Z_AXIS_BIT}, (axes_signals_t){0});
-                else
+                } else {
+                    step_count--;
                     hal.stepper.output_step((axes_signals_t){Z_AXIS_BIT}, (axes_signals_t){Z_AXIS_BIT});
+                }
             }
         }
     } else
@@ -477,16 +601,52 @@ ISR_CODE static void trap_control_interrupts (control_signals_t signals)
 }
 */
 
+// Convert control signals bits to string representation.
+// NOTE: returns pointer to null terminator!
+static inline char *signals_tostring (char *buf, thc_signals_t signals)
+{
+    static const char signals_map[] = "ATEOFBR  VHUD    ";
+
+    char *map = (char *)signals_map;
+
+    if(signals.bits)
+        *buf++ = ',';
+
+    while(signals.bits) {
+
+        if(signals.bits & 0x01) {
+            switch(*map) {
+
+                case ' ':
+                    break;
+
+                default:
+                    *buf++ = *map;
+                    break;
+            }
+        }
+
+        map++;
+        signals.bits >>= 1;
+    }
+
+    *buf = '\0';
+
+    return buf;
+}
+
+
 static void onRealtimeReport (stream_write_ptr stream_write, report_tracking_flags_t report)
 {
-    static char buf[15];
-    char *append = &buf[5];
+    static char buf[24];
 
     strcpy(buf, "|THC:");
     strcat(buf, ftoa(arc_voltage, 1));
+    signals_tostring(strchr(buf, '\0'), thc);
+    stream_write(buf);
 
-    append = &buf[strlen(buf)];
-
+    thc.report_up = thc.report_down = Off;
+/*
     if(thc.value) {
         *append++ = ',';
         if(thc.arc_ok)
@@ -510,7 +670,7 @@ static void onRealtimeReport (stream_write_ptr stream_write, report_tracking_fla
         thc.report_up = thc.report_down = Off;
     }
     *append = '\0';
-    stream_write(buf);
+*/
 
     if(on_realtime_report)
         on_realtime_report(stream_write, report);
@@ -665,7 +825,8 @@ PROGMEM static const setting_detail_t plasma_settings[] = {
     { Setting_Arc_VoltagePort, Group_AuxPorts, "Arc voltage port", NULL, Format_Decimal, "-#0", "-1", max_aport, Setting_NonCoreFn, set_port, get_port, is_setting_available, { .reboot_required = On } },
     { Setting_Arc_OkPort, Group_AuxPorts, "Arc ok port", NULL, Format_Decimal, "-#0", "-1", max_dport, Setting_NonCoreFn, set_port, get_port, NULL, { .reboot_required = On } },
     { Setting_THC_CutterDownPort, Group_AuxPorts, "Cutter down port", NULL, Format_Decimal, "-#0", "-1", max_dport, Setting_NonCoreFn, set_port, get_port, is_setting_available, { .reboot_required = On } },
-    { Setting_THC_CutterUpPort, Group_AuxPorts, "Cutter up port", NULL, Format_Decimal, "-#0", "-1", max_dport, Setting_NonCoreFn, set_port, get_port, is_setting_available, { .reboot_required = On } }
+    { Setting_THC_CutterUpPort, Group_AuxPorts, "Cutter up port", NULL, Format_Decimal, "-#0", "-1", max_dport, Setting_NonCoreFn, set_port, get_port, is_setting_available, { .reboot_required = On } },
+    { Setting_THC_Options, Group_Plasma, "Plasma options", NULL, Format_Bitfield, "Virtual ports,Sync Z position", NULL, NULL, Setting_NonCore, &plasma.option.flags, NULL, NULL, { .reboot_required = On } },
 };
 
 #ifndef NO_SETTINGS_DESCRIPTIONS
@@ -694,7 +855,8 @@ PROGMEM static const setting_descr_t plasma_settings_descr[] = {
     { Setting_Arc_VoltagePort, "Aux port number to use for arc voltage. Set to -1 to disable." },
     { Setting_Arc_OkPort, "Aux port number to use for arc ok signal. Set to -1 to disable." },
     { Setting_THC_CutterDownPort, "Aux port number to use for cutter down signal. Set to -1 to disable." },
-    { Setting_THC_CutterUpPort, "Aux port number to use for cutter up signal. Set to -1 to disable." }
+    { Setting_THC_CutterUpPort, "Aux port number to use for cutter up signal. Set to -1 to disable." },
+    { Setting_THC_Options, "" }
 };
 
 #endif
@@ -707,6 +869,7 @@ static void plasma_settings_save (void)
 static void plasma_settings_restore (void)
 {
     plasma.mode = updown_enabled ? Plasma_ModeUpDown : Plasma_ModeVoltage;
+    plasma.option.flags = 0;
     plasma.thc_delay = 3.0f;
     plasma.thc_threshold = 1.0f;
     plasma.thc_override = 100;
@@ -793,7 +956,8 @@ static void plasma_settings_load (void)
         settings_changed = hal.settings_changed;
         hal.settings_changed = plasma_setup;
 
-//        protocol_enqueue_foreground_task(add_virtual_ports, NULL);
+        if(plasma.option.virtual_ports)
+            protocol_enqueue_foreground_task(add_virtual_ports, NULL);
 
     } else
         protocol_enqueue_foreground_task(report_warning, "Plasma mode failed to initialize!");
@@ -809,7 +973,7 @@ static void onReportOptions (bool newopt)
     on_report_options(newopt);
 
     if(!newopt)
-        report_plugin("PLASMA", "0.15");
+        report_plugin("PLASMA", "0.16");
     else if(driver_reset) // non-null when successfully enabled
         hal.stream.write(",THC");
 }
