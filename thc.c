@@ -37,6 +37,7 @@
 #include "grbl/pid.h"
 #include "grbl/nvs_buffer.h"
 #include "grbl/stepper2.h"
+#include "grbl/state_machine.h"
 
 #define THC_SAMPLE_AVG 5
 
@@ -806,7 +807,7 @@ static float get_port (setting_id_t setting)
 }
 
 PROGMEM static const setting_detail_t plasma_settings[] = {
-    { Setting_THC_Mode, Group_Plasma, "Plasma mode", NULL, Format_RadioButtons, thc_modes, NULL, NULL, Setting_NonCore, &plasma.mode, NULL, NULL },
+    { Setting_THC_Mode, Group_Plasma, "Plasma mode", NULL, Format_RadioButtons, thc_modes, NULL, NULL, Setting_NonCore, &plasma.mode, NULL, NULL, { .reboot_required = On } },
     { Setting_THC_Delay, Group_Plasma, "Plasma THC delay", "s", Format_Decimal, "#0.0", NULL, NULL, Setting_NonCore, &plasma.thc_delay, NULL, NULL },
     { Setting_THC_Threshold, Group_Plasma, "Plasma THC threshold", "V", Format_Decimal, "#0.00", NULL, NULL, Setting_NonCore, &plasma.thc_threshold, NULL, is_setting_available },
     { Setting_THC_PGain, Group_Plasma, "Plasma THC P-gain", NULL, Format_Decimal, "###0.000", NULL, NULL, Setting_NonCore, &plasma.pid.p_gain, NULL, is_setting_available },
@@ -913,8 +914,6 @@ static bool plasma_claim_digital_in (xbar_t *target, uint8_t port, const char *d
 
 static void plasma_settings_load (void)
 {
-    bool init_ok;
-
     if(hal.nvs.memcpy_from_nvs((uint8_t *)&plasma, nvs_address, sizeof(plasma_settings_t), true) != NVS_TransferResult_OK) {
         plasma.port_arc_ok = plasma.port_cutter_down = plasma.port_cutter_up = 255;
         plasma_settings_restore();
@@ -973,7 +972,7 @@ static void onReportOptions (bool newopt)
     on_report_options(newopt);
 
     if(!newopt)
-        report_plugin("PLASMA", "0.16");
+        report_plugin("PLASMA", "0.17");
     else if(driver_reset) // non-null when successfully enabled
         hal.stream.write(",THC");
 }
