@@ -35,7 +35,35 @@ Under development. Based on [LinuxCNC specification](http://linuxcnc.org/docs/2.
 | $364 - Ok High Voltage | - | This sets the voltage threshold below which Arc OK signal is valid.|
 | $365 - Ok Low Voltage  | - | This sets the voltage threshold above which the Arc OK signal is valid.|
 
-#### Supported M-Codes
+#### Auxiliary I/O
+
+| Setting                 | Description |
+|-------------------------|-------------|
+| $366 - Arc voltage port | This sets which analog input port to use for the arc voltage signal. Set to -1 to not use any.<sup>1</sup> |
+| $367 - Arc ok port      | This sets which digital input port to use for the arc ok signal. Set to -1 to not use any.<sup>2</sup> |
+| $368 - Cutter down port | This sets which digital input port to use for the cutter down signal. Set to -1 to not use any. |
+| $369 - Cutter up port   | This sets which digital input port to use for the cutter up signal. Set to -1 to not use any. |
+
+<sup>1</sup> This pin/port is required to enable voltage controlled THC.  
+<sup>2</sup> This pin/port is required to enable the plugin.
+
+Tip: use the `$PINS` command to list available pins. The port number is the number following the "_Aux in_" text, an example: `[PIN:P3.2,Aux in 0,P0]`.
+
+#### $674 - Plugin options
+
+| Bit | Value |Description |
+|-----|-------|------------|
+| 0   | 1     | Enable virtual ports. |
+| 1   | 2     | Sync Z position. Update the Z position when THC control ends. |
+
+Add the _Value_ fields for the functionality to enable to get the one to use for the setting.
+
+> [!NOTE]
+> Virtual ports will shadow any real ports with the same port number. Some dummy ports may also be added.
+
+#### Virtual ports
+
+Virtual ports are controlled by regular M-Codes.
 
 * `M62 P2` will disable THC \(Synchronized with Motion\)
 
@@ -56,11 +84,12 @@ The maximum percentage allowed is 100%, values above this will be set to 100%.
 
 #### Dependencies:
 
-Driver must support a number of [ioports ports](../../templates/ioports.c).
+Driver must support a number of auxiliary I/O ports, at least one digital input for the arc ok signal.  
+Some drivers support the MCP3221 I2C ADC, when enabled it can be used for the arc voltage signal.
 
 #### Credits:
 
 LinuxCNC documentation linked to above.
 
 ---
-2021-08-10
+2024-01-26
