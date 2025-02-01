@@ -49,8 +49,9 @@
 
 typedef enum {
     Plasma_ModeOff = 0,
-    Plasma_ModeVoltage = 1,
-    Plasma_ModeUpDown = 2
+    Plasma_ModeVoltage,
+    Plasma_ModeUpDown,
+    Plasma_ModeArcOK
 } plasma_mode_t;
 
 typedef union {
@@ -115,9 +116,10 @@ static void state_idle (void);
 static void state_thc_delay (void);
 static void state_thc_pid (void);
 static void state_thc_adjust (void);
+static void state_arc_monitor (void);
 static void state_vad_lock (void);
 
-static bool set_feed_override = false, updown_enabled = false, init_ok = false;
+static bool set_feed_override = false, updown_enabled = false, init_ok = false, thc_disabled = false;
 static uint8_t n_ain, n_din;
 static uint8_t port_arc_ok, port_arc_voltage;
 static uint_fast8_t feed_override, segment_id = 0;
@@ -129,10 +131,11 @@ static float fr_pgm, fr_actual, fr_thr_99, fr_thr_vad;
 static thc_signals_t thc = {0};
 static pidf_t pid;
 static nvs_address_t nvs_address;
-static char thc_modes[] = "Off,Voltage,Up/down";
+static char thc_modes[] = "Off,Voltage,Up/down,Arc ok";
 static plasma_settings_t plasma;
 static st2_motor_t *z_motor;
 static void (*volatile stateHandler)(void) = state_idle;
+static plasma_mode_t mode = Plasma_ModeOff;
 static xbar_t arc_ok, cutter_down, cutter_up, parc_voltage;
 
 static settings_changed_ptr settings_changed;
@@ -260,10 +263,13 @@ static void enumeratePins (bool low_level, pin_info_ptr pin_info, void *data)
 static void digital_out (uint8_t portnum, bool on)
 {
     if(portnum == PLASMA_THC_DISABLE_PORT) {
-        if(!(thc.enabled = !on))
-            stateHandler = state_idle;
-        else if(thc.arc_ok)
-            stateHandler = plasma.mode == Plasma_ModeUpDown ? state_thc_adjust : state_thc_pid;
+        thc_disabled = on;
+        if(thc.arc_ok && mode != Plasma_ModeArcOK) {
+            if(!(thc.enabled = !thc_disabled))
+                stateHandler = state_arc_monitor;
+            else
+                stateHandler = mode == Plasma_ModeUpDown ? state_thc_adjust : state_thc_pid;
+        }
     } else if(portnum == PLASMA_TORCH_DISABLE_PORT) {
         // PLASMA_TORCH_DISABLE_PORT:
         // TODO
@@ -377,12 +383,12 @@ static void pause_on_error (void)
 
 static void state_idle (void)
 {
-    if(plasma.mode == Plasma_ModeVoltage)
+    if(mode == Plasma_ModeVoltage)
         arc_voltage = parc_voltage.get_value(&parc_voltage) * plasma.arc_voltage_scale - plasma.arc_voltage_offset;
 
     if(plasma.option.sync_pos && state_get() == STATE_IDLE) {
 
-        if(plasma.mode != Plasma_ModeUpDown)
+        if(mode != Plasma_ModeUpDown)
             step_count =(uint32_t)st2_get_position(z_motor);
 
         if(step_count && state_get() == STATE_IDLE) {
@@ -397,8 +403,10 @@ static void state_idle (void)
 static void state_thc_delay (void)
 {
     if(hal.get_elapsed_ticks() >= thc_delay) {
-        thc.enabled = On;
-        if(plasma.mode == Plasma_ModeUpDown) {
+
+        if(!(thc.enabled = !(thc_disabled || mode == Plasma_ModeArcOK)))
+            stateHandler = state_arc_monitor;
+        else if(mode == Plasma_ModeUpDown) {
             step_count = 0;
             stateHandler = state_thc_adjust;
         } else {
@@ -409,6 +417,12 @@ static void state_thc_delay (void)
             stateHandler();
         }
     }
+}
+
+static void state_arc_monitor (void)
+{
+    if(!(thc.arc_ok = arc_ok.get_value(&arc_ok) == 1.0f))
+        pause_on_error();
 }
 
 static void state_thc_adjust (void)
@@ -550,7 +564,7 @@ static void arcSetState (spindle_ptrs_t *spindle, spindle_state_t state, float r
             spindle_set_state_(spindle, state, rpm);
             thc.torch_on = On;
             report_message("arc on", Message_Plain);
-            if((thc.arc_ok = rport.wait_on_input(Port_Digital, port_arc_ok, WaitMode_High, plasma.arc_fail_timeout) != -1)) {
+            if((thc.arc_ok = hal.port.wait_on_input(Port_Digital, port_arc_ok, WaitMode_High, plasma.arc_fail_timeout) != -1)) {
                 report_message("arc ok", Message_Plain);
                 retries = 0;
                 thc_delay = hal.get_elapsed_ticks() + (uint32_t)ceilf(1000.0f * plasma.thc_delay); // handle overflow!
@@ -647,31 +661,6 @@ static void onRealtimeReport (stream_write_ptr stream_write, report_tracking_fla
     stream_write(buf);
 
     thc.report_up = thc.report_down = Off;
-/*
-    if(thc.value) {
-        *append++ = ',';
-        if(thc.arc_ok)
-            *append++ = 'A';
-        if(thc.enabled)
-            *append++ = 'E';
-        if(thc.active)
-            *append++ = 'R';
-        if(thc.torch_on)
-            *append++ = 'T';
-        if(thc.ohmic_probe)
-            *append++ = 'O';
-        if(thc.velocity_lock)
-            *append++ = 'V';
-        if(thc.void_lock)
-            *append++ = 'H';
-        if(thc.report_down)
-            *append++ = 'D';
-        if(thc.report_up)
-            *append++ = 'U';
-        thc.report_up = thc.report_down = Off;
-    }
-    *append = '\0';
-*/
 
     if(on_realtime_report)
         on_realtime_report(stream_write, report);
@@ -682,7 +671,10 @@ static void onSpindleSelected (spindle_ptrs_t *spindle)
     spindle_set_state_ = spindle->set_state;
 
     spindle->set_state = arcSetState;
-    spindle->cap.at_speed = Off; // TODO: only disable if PWM spindle active?
+    // TODO: only change caps if PWM spindle active?
+    spindle->cap.at_speed = Off;
+//??    spindle->cap.laser = Off;
+    spindle->cap.torch = On;
 
     if(on_spindle_selected)
         on_spindle_selected(spindle);
@@ -696,6 +688,9 @@ static void plasma_setup (settings_t *settings, settings_changed_flags_t changed
 
         driver_reset = hal.driver_reset;
         hal.driver_reset = reset;
+
+        on_spindle_selected = grbl.on_spindle_selected;
+        grbl.on_spindle_selected = onSpindleSelected;
 
         on_realtime_report = grbl.on_realtime_report;
         grbl.on_realtime_report = onRealtimeReport;
@@ -869,7 +864,7 @@ static void plasma_settings_save (void)
 
 static void plasma_settings_restore (void)
 {
-    plasma.mode = updown_enabled ? Plasma_ModeUpDown : Plasma_ModeVoltage;
+    plasma.mode = mode;
     plasma.option.flags = 0;
     plasma.thc_delay = 3.0f;
     plasma.thc_threshold = 1.0f;
@@ -903,7 +898,7 @@ static bool plasma_claim_digital_in (xbar_t *target, uint8_t port, const char *d
     xbar_t *p;
     bool ok = false;
 
-    if((p = ioport_get_info(Port_Digital, Port_Input, port)) && p->get_value && !p->mode.claimed) {
+    if(port != 255 && (p = ioport_get_info(Port_Digital, Port_Input, port)) && p->get_value && !p->mode.claimed) {
         memcpy(target, p, sizeof(xbar_t));
         if((ok = ioport_claim(Port_Digital, Port_Input, &port, description)) && target == &arc_ok)
             port_arc_ok = port;
@@ -919,45 +914,47 @@ static void plasma_settings_load (void)
         plasma_settings_restore();
     }
 
-    port_arc_voltage = plasma.port_arc_voltage;
+    if((mode = plasma.mode) == Plasma_ModeOff)
+        return;
 
-    if(!(init_ok = n_ain == 0)) {
+    if(!(init_ok = mode != Plasma_ModeVoltage)) {
 
-        xbar_t *p;
+        if(plasma.port_arc_voltage != 255) {
 
-        if(port_arc_voltage == 255)
-            plasma.port_arc_voltage = port_arc_voltage = 0;
+            xbar_t *p;
 
-        if((p = ioport_get_info(Port_Analog, Port_Input, port_arc_voltage)) && p->get_value && !p->mode.claimed) {
-            memcpy(&parc_voltage, p, sizeof(xbar_t));
-            init_ok = ioport_claim(Port_Analog, Port_Input, &port_arc_voltage, "Arc voltage");
+            if((p = ioport_get_info(Port_Analog, Port_Input, port_arc_voltage)) && p->get_value && !p->mode.claimed) {
+                memcpy(&parc_voltage, p, sizeof(xbar_t));
+                init_ok = ioport_claim(Port_Analog, Port_Input, &port_arc_voltage, "Arc voltage");
+            }
         }
 
-//        init_ok = ioport_claim(Port_Analog, Port_Input, &port_arc_voltage, "Arc voltage");
+        if(!init_ok) {
+            init_ok = true;
+            mode = Plasma_ModeUpDown;
+        }
     }
 
     init_ok = init_ok && plasma_claim_digital_in(&arc_ok, plasma.port_arc_ok, "Arc ok");
-    if(init_ok && n_din > 2 && plasma.port_cutter_down != 255) {
-        init_ok = plasma_claim_digital_in(&cutter_down, plasma.port_cutter_down, "Cutter down");
-        init_ok = init_ok && plasma_claim_digital_in(&cutter_up, plasma.port_cutter_up, "Cutter up");
+
+    if(init_ok && mode == Plasma_ModeUpDown) {
+        if(!(plasma_claim_digital_in(&cutter_down, plasma.port_cutter_down, "Cutter down") &&
+              plasma_claim_digital_in(&cutter_up, plasma.port_cutter_up, "Cutter up")))
+            mode = Plasma_ModeArcOK;
     }
 
     if(init_ok) {
 
-        if(n_ain == 0 && plasma.mode == Plasma_ModeVoltage)
-            plasma.mode = Plasma_ModeUpDown;
-
-        if(n_din < 3 && plasma.mode == Plasma_ModeUpDown)
-            plasma.mode = n_ain >= 1 ? Plasma_ModeVoltage : Plasma_ModeOff;
-
-        updown_enabled = plasma.mode == Plasma_ModeUpDown;
+        updown_enabled = mode == Plasma_ModeUpDown;
 
         settings_changed = hal.settings_changed;
         hal.settings_changed = plasma_setup;
 
+        if(plasma.mode != mode)
+            protocol_enqueue_foreground_task(report_warning, "Plasma mode changed due to lack of inputs!");
+
         if(plasma.option.virtual_ports)
             protocol_enqueue_foreground_task(add_virtual_ports, NULL);
-
     } else
         protocol_enqueue_foreground_task(report_warning, "Plasma mode failed to initialize!");
 }
@@ -971,9 +968,25 @@ static void onReportOptions (bool newopt)
 {
     on_report_options(newopt);
 
-    if(!newopt)
-        report_plugin("PLASMA", "0.17");
-    else if(driver_reset) // non-null when successfully enabled
+    if(!newopt) {
+
+        plasma_mode_t i = Plasma_ModeOff;
+        char buf[30] = "PLASMA (", *s1 = &buf[8], *s2 = thc_modes, c;
+
+        while((c = *s2++)) {
+            if(i == mode) {
+                if(c == ',')
+                    break;
+                *s1++ = c;
+            } else if(c == ',')
+                i++;
+        }
+        *s1++ = ')';
+        *s1 = '\0';
+
+        report_plugin(buf, "0.18");
+
+    } else if(mode != Plasma_ModeOff)
         hal.stream.write(",THC");
 }
 
@@ -1018,19 +1031,16 @@ void plasma_init (void)
         on_report_options = grbl.on_report_options;
         grbl.on_report_options = onReportOptions;
 
-        on_spindle_selected = grbl.on_spindle_selected;
-        grbl.on_spindle_selected = onSpindleSelected;
-
 /*
         control_interrupt_callback = hal.control_interrupt_callback;
         hal.control_interrupt_callback = trap_control_interrupts;
 */
 
         if(n_ain == 0)
-            setting_remove_elements(Setting_THC_Mode, 0b101);
+            setting_remove_elements(Setting_THC_Mode, 0b1101);
 
         if(n_din < 3)
-            setting_remove_elements(Setting_THC_Mode, 0b011);
+            setting_remove_elements(Setting_THC_Mode, 0b1011);
 
     } else
         protocol_enqueue_foreground_task(report_warning, "Plasma mode failed to initialize!");
