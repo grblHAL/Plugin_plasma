@@ -26,6 +26,7 @@
 #if PLASMA_ENABLE
 
 #include <math.h>
+#include <stdio.h>
 #include <stdint.h>
 #include <stdbool.h>
 #include <string.h>
@@ -53,6 +54,31 @@ typedef enum {
     Plasma_ModeUpDown,
     Plasma_ModeArcOK
 } plasma_mode_t;
+
+typedef struct material
+{
+    uint32_t id;                    // nu
+    char name[50];                  // na
+    bool thc_status;                // th
+    union {
+        float params[12];
+        struct {
+            float pierce_height;    // ph
+            float pierce_delay;     // pd
+            float cut_height;       // ch
+            float feed_rate;        // fr
+            float kerf_width;       // kw
+            float cut_amps;         // ca
+            float cut_voltage;      // cv
+            float end_pause;        // pe
+            float gas_pressure;     // gp
+            float cut_mode;         // cm
+            float jump_height;      // jh
+            float jump_delay;       // jd
+        };
+    };
+    struct material *next;
+} material_t;
 
 typedef union {
     uint8_t flags;
@@ -137,6 +163,8 @@ static st2_motor_t *z_motor;
 static void (*volatile stateHandler)(void) = state_idle;
 static plasma_mode_t mode = Plasma_ModeOff;
 static xbar_t arc_ok, cutter_down, cutter_up, parc_voltage;
+static uint32_t mat_number = 1000000;
+static material_t *materials = NULL, *material = NULL, tmp_material;
 
 static settings_changed_ptr settings_changed;
 static driver_reset_ptr driver_reset = NULL;
@@ -148,6 +176,47 @@ static on_report_options_ptr on_report_options;
 static on_spindle_selected_ptr on_spindle_selected;
 static on_execute_realtime_ptr on_execute_realtime = NULL;
 static on_realtime_report_ptr on_realtime_report = NULL;
+static on_gcode_message_ptr on_gcode_comment;
+static user_mcode_ptrs_t user_mcode;
+
+static uint32_t strnumentries (const char *s, const char delimiter)
+{
+    char *p = (char *)s;
+    uint32_t entries = *s ? 1 : 0;
+
+    while(entries && (p = strchr(p, delimiter))) {
+        p++;
+        entries++;
+    }
+
+    return entries;
+}
+
+static int32_t strlookup (const char *s1, const char *s2, const char delimiter)
+{
+    bool found = false;
+    char *e, *p = (char *)s2;
+    uint32_t idx = strnumentries(s2, delimiter), len = strlen(s1);
+    int32_t entry = 0;
+
+    while(idx--) {
+
+        if((e = strchr(p, delimiter)))
+            found = (e - p) == len && !strncmp(p, s1, e - p);
+        else
+            found = strlen(p) == len && !strcmp(p, s1);
+
+        if(found || e == NULL)
+            break;
+        else {
+            p = e + 1;
+            entry++;
+        }
+    }
+
+    return found ? entry : -1;
+}
+
 
 // --- Virtual ports start
 
@@ -361,6 +430,168 @@ static void add_virtual_ports (void *data)
     }
 }
 
+static material_t *find_material (uint32_t id)
+{
+    material_t *material = materials, *found = NULL;
+
+    if(material) do {
+        if(material->id == id)
+            found = material;
+    } while(found == NULL && (material = material->next));
+
+    return found;
+}
+
+static user_mcode_type_t mcode_check (user_mcode_t mcode)
+{
+    return mcode == Plasma_SelectMaterial
+                     ? UserMCode_Normal
+                     : (user_mcode.check ? user_mcode.check(mcode) : UserMCode_Unsupported);
+}
+
+static status_code_t mcode_validate (parser_block_t *gc_block)
+{
+    status_code_t state = Status_OK;
+
+    if(gc_block->user_mcode == Plasma_SelectMaterial) {
+        if(gc_block->words.p) {
+            if(!isintf(gc_block->values.p))
+                state = Status_BadNumberFormat;
+            else if(gc_block->words.p && !(gc_block->values.p == -1.0f || find_material((uint32_t)gc_block->values.p)))
+                state = Status_GcodeValueOutOfRange;
+            else
+                gc_block->words.p = Off;
+        }
+    } else
+        state = Status_Unhandled;
+
+    return state == Status_Unhandled && user_mcode.validate ? user_mcode.validate(gc_block) : state;
+}
+
+static void mcode_execute (uint_fast16_t state, parser_block_t *gc_block)
+{
+    if(gc_block->user_mcode == Plasma_SelectMaterial) {
+        if((material = gc_block->values.p == -1.0f ? NULL : find_material((uint32_t)gc_block->values.p))) {
+            char command[30];
+            sprintf(command, "G1Z%.3fF%.1f", material->pierce_height, material->feed_rate);
+//            grbl.enqueue_gcode(command);
+        }
+    } else if(user_mcode.execute)
+        user_mcode.execute(state, gc_block);
+}
+
+static status_code_t onGcodeComment (char *comment)
+{
+    static const char params[] = "ph,pd,ch,fr,kw,ca,cv,pe,gp,cm,jh,jd,nu,na,th"; // NOTE: must match layout of material_t
+
+    status_code_t status = Status_OK;
+
+    if(strlen(comment) > 5 && comment[0] == 'o' && comment[1] == '=') {
+
+        material_t new_material = {};
+        char option = comment[2];
+
+        uint_fast8_t i;
+
+        if(option == '0')
+            new_material.id = mat_number++;
+
+        for(i = 0; i < 12; i++)
+            new_material.params[i] = NAN;
+
+        char *param = strtok(comment + 4, ","), *eq;
+
+        while(param && status == Status_OK) {
+
+            while(*param == ' ')
+                param++;
+
+            if((eq = strchr(param, '='))) {
+
+                int32_t p;
+
+                *eq = '\0';
+
+                switch((p = strlookup(param, params, ','))) {
+
+                    case -1:
+                        status = Status_GcodeUnsupportedCommand;
+                        break;
+
+                    case 12:
+                        if(option != '0') {
+                            uint_fast8_t cc = 1;
+                            status = read_uint(eq, &cc, &new_material.id);
+                        }
+                        break;
+
+                    case 13:
+                        strncpy(new_material.name, eq + 1, sizeof(new_material.name));
+                        new_material.name[sizeof(new_material.name) - 1] = '\0';
+                        break;
+
+                    case 14:
+                        new_material.thc_status = eq[1] != '0';
+                        break;
+
+                    default:
+                        {
+                            uint_fast8_t cc = 1;
+                            if(!read_float(eq, &cc, &new_material.params[p]))
+                                status = Status_BadNumberFormat;
+                        }
+                        break;
+                }
+                *eq = '=';
+            }
+            param = strtok(NULL, ",");
+        }
+
+        if(isnanf(new_material.pierce_height) ||
+            isnanf(new_material.pierce_delay) ||
+             isnanf(new_material.cut_height) ||
+              isnanf(new_material.feed_rate))
+            status = Status_GcodeValueWordMissing;
+
+        if(status == Status_OK) switch(option) {
+
+            case '0':
+                material = &tmp_material;
+                memcpy(material, &new_material, sizeof(material_t));
+                break;
+
+            case '1':
+            case '2':
+                material_t *m = find_material(new_material.id);
+                bool add = m == NULL;
+                if(option == '2' || m == NULL) {
+                    if(m == NULL)
+                        m = malloc(sizeof(material_t));
+                    if(m) {
+                        memcpy(m, &new_material, sizeof(material_t));
+                        if(materials == NULL)
+                            materials = m;
+                        else if(add) {
+                            material_t *last = materials;
+                            while(last->next)
+                                last = last->next;
+                            last->next = m;
+                        }
+                    } // else error....
+                }
+                break;
+
+            default:
+                status = Status_GcodeUnsupportedCommand;
+                break;
+        }
+
+    } else if(on_gcode_comment)
+        status = on_gcode_comment(comment);
+
+    return status;
+}
+
 // --- Virtual ports end
 
 static void set_target_voltage (float v)
@@ -412,7 +643,10 @@ static void state_thc_delay (void)
         } else {
             pidf_reset(&pid);
             st2_set_position(z_motor, 0LL);
-            set_target_voltage(parc_voltage.get_value(&parc_voltage) * plasma.arc_voltage_scale - plasma.arc_voltage_offset);
+            if(material && !isnanf(material->cut_voltage))
+                set_target_voltage(material->cut_voltage);
+            else
+                set_target_voltage(parc_voltage.get_value(&parc_voltage) * plasma.arc_voltage_scale - plasma.arc_voltage_offset);
             stateHandler = state_vad_lock;
             stateHandler();
         }
@@ -567,7 +801,7 @@ static void arcSetState (spindle_ptrs_t *spindle, spindle_state_t state, float r
             if((thc.arc_ok = hal.port.wait_on_input(Port_Digital, port_arc_ok, WaitMode_High, plasma.arc_fail_timeout) != -1)) {
                 report_message("arc ok", Message_Plain);
                 retries = 0;
-                thc_delay = hal.get_elapsed_ticks() + (uint32_t)ceilf(1000.0f * plasma.thc_delay); // handle overflow!
+                thc_delay = hal.get_elapsed_ticks() + (uint32_t)ceilf(1000.0f * (material ? material->pierce_delay : plasma.thc_delay)); // handle overflow!
                 stateHandler = state_thc_delay;
             } else if(!(--retries)) {
                 thc.torch_on = Off;
@@ -984,7 +1218,7 @@ static void onReportOptions (bool newopt)
         *s1++ = ')';
         *s1 = '\0';
 
-        report_plugin(buf, "0.18");
+        report_plugin(buf, "0.19");
 
     } else if(mode != Plasma_ModeOff)
         hal.stream.write(",THC");
@@ -1028,8 +1262,17 @@ void plasma_init (void)
 
         settings_register(&setting_details);
 
+        memcpy(&user_mcode, &grbl.user_mcode, sizeof(user_mcode_ptrs_t));
+
+        grbl.user_mcode.check = mcode_check;
+        grbl.user_mcode.validate = mcode_validate;
+        grbl.user_mcode.execute = mcode_execute;
+
         on_report_options = grbl.on_report_options;
         grbl.on_report_options = onReportOptions;
+
+        on_gcode_comment = grbl.on_gcode_comment;
+        grbl.on_gcode_comment = onGcodeComment;
 
 /*
         control_interrupt_callback = hal.control_interrupt_callback;
