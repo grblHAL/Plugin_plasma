@@ -82,6 +82,24 @@ The Q-word for M67 and M68 is the percentage of the programmed feed rate the act
 The minimum percentage allowed is 10%, values below this will be set to 10%.  
 The maximum percentage allowed is 100%, values above this will be set to 100%.
 
+#### Materials
+
+The plugin can load and partially make use of LinuxCNC and/or SheetCam style material files. Loading is from either a SD card or from root mounted littlefs file system.
+
+The following files are currently loaded from if present:
+* LinuxCNC: _/linuxcnc/material.cfg_
+* SheetCam: _/sheetcam/default.tools_
+
+Additionally materials can be modified or added by LinuxCNC style _magic_ [gcode comments](https://linuxcnc.org/docs/html/plasma/qtplasmac.html#plasma:magic-comments).
+
+To select the material to use `M190P<n>` where `<n>` is the material number.  
+If NGC parameter support is enabled in the controller the feedrate from the selected material can be set by adding `F#<_hal[plasmac.cut-feed-rate]>` to the gcode file.
+
+Currently loaded materials can be output to the sender console with the `$EM` command, the output is in a machine readable format.
+
+> [!NOTE]
+> Settings updated via _magic_ comments are currently _not_ written back to the material file.
+
 #### Dependencies:
 
 Driver must support a number of auxiliary I/O ports, at least one digital input for the arc ok signal.  
@@ -92,4 +110,4 @@ Some drivers support the MCP3221 I2C ADC, when enabled it can be used for the ar
 LinuxCNC documentation linked to above.
 
 ---
-2024-01-26
+2025-02-23

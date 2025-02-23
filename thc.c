@@ -21,7 +21,7 @@
 
 */
 
-#include "driver.h"
+#include "thc.h"
 
 #if PLASMA_ENABLE
 
@@ -39,14 +39,22 @@
 #include "grbl/nvs_buffer.h"
 #include "grbl/stepper2.h"
 #include "grbl/state_machine.h"
+#include "grbl/strutils.h"
+#include "grbl/motion_control.h"
+#if NGC_EXPRESSIONS_ENABLE
+#include "grbl/ngc_expr.h"
+#endif
 
-#define THC_SAMPLE_AVG 5
+extern void linuxcnc_init (void);
+extern void sheetcam_init (void);
 
+#define THC_SAMPLE_AVG                  5
+#define PLASMA_TMP_MATERIAL_ID_START    1000000
 // Digital ports
-#define PLASMA_THC_DISABLE_PORT   2 // output
-#define PLASMA_TORCH_DISABLE_PORT 3 // output
+#define PLASMA_THC_DISABLE_PORT         2 // output
+#define PLASMA_TORCH_DISABLE_PORT       3 // output
 // Analog ports
-#define PLASMA_FEED_OVERRIDE_PORT 3
+#define PLASMA_FEED_OVERRIDE_PORT       3
 
 typedef enum {
     Plasma_ModeOff = 0,
@@ -55,30 +63,22 @@ typedef enum {
     Plasma_ModeArcOK
 } plasma_mode_t;
 
-typedef struct material
-{
-    uint32_t id;                    // nu
-    char name[50];                  // na
-    bool thc_status;                // th
+// float parameters must be in the same order as in material_t.
+typedef struct {
+    int32_t id;
+    bool thc_disabled;
     union {
-        float params[12];
+        float params[6];
         struct {
-            float pierce_height;    // ph
-            float pierce_delay;     // pd
-            float cut_height;       // ch
-            float feed_rate;        // fr
-            float kerf_width;       // kw
-            float cut_amps;         // ca
-            float cut_voltage;      // cv
-            float end_pause;        // pe
-            float gas_pressure;     // gp
-            float cut_mode;         // cm
-            float jump_height;      // jh
-            float jump_delay;       // jd
+            float pierce_height;
+            float pierce_delay;
+            float feed_rate;
+            float cut_height;
+            float cut_voltage;
+            float pause_at_end;
         };
     };
-    struct material *next;
-} material_t;
+} plasma_job_t;
 
 typedef union {
     uint8_t flags;
@@ -145,7 +145,9 @@ static void state_thc_adjust (void);
 static void state_arc_monitor (void);
 static void state_vad_lock (void);
 
-static bool set_feed_override = false, updown_enabled = false, init_ok = false, thc_disabled = false;
+plasma_control_t cutter = {};
+
+static bool set_feed_override = false, updown_enabled = false, init_ok = false;
 static uint8_t n_ain, n_din;
 static uint8_t port_arc_ok, port_arc_voltage;
 static uint_fast8_t feed_override, segment_id = 0;
@@ -163,8 +165,9 @@ static st2_motor_t *z_motor;
 static void (*volatile stateHandler)(void) = state_idle;
 static plasma_mode_t mode = Plasma_ModeOff;
 static xbar_t arc_ok, cutter_down, cutter_up, parc_voltage;
-static uint32_t mat_number = 1000000;
-static material_t *materials = NULL, *material = NULL, tmp_material;
+static uint32_t material_id = PLASMA_TMP_MATERIAL_ID_START;
+static material_t *materials = NULL, tmp_material = { .id = -1 };
+static plasma_job_t job = {};
 
 static settings_changed_ptr settings_changed;
 static driver_reset_ptr driver_reset = NULL;
@@ -179,44 +182,7 @@ static on_realtime_report_ptr on_realtime_report = NULL;
 static on_gcode_message_ptr on_gcode_comment;
 static user_mcode_ptrs_t user_mcode;
 
-static uint32_t strnumentries (const char *s, const char delimiter)
-{
-    char *p = (char *)s;
-    uint32_t entries = *s ? 1 : 0;
-
-    while(entries && (p = strchr(p, delimiter))) {
-        p++;
-        entries++;
-    }
-
-    return entries;
-}
-
-static int32_t strlookup (const char *s1, const char *s2, const char delimiter)
-{
-    bool found = false;
-    char *e, *p = (char *)s2;
-    uint32_t idx = strnumentries(s2, delimiter), len = strlen(s1);
-    int32_t entry = 0;
-
-    while(idx--) {
-
-        if((e = strchr(p, delimiter)))
-            found = (e - p) == len && !strncmp(p, s1, e - p);
-        else
-            found = strlen(p) == len && !strcmp(p, s1);
-
-        if(found || e == NULL)
-            break;
-        else {
-            p = e + 1;
-            entry++;
-        }
-    }
-
-    return found ? entry : -1;
-}
-
+static const char params[] = "ph,pd,fr,ch,cv,pe,kw,ca,gp,cm,jh,jd,nu,na,th"; // NOTE: must match layout of material_t
 
 // --- Virtual ports start
 
@@ -332,9 +298,9 @@ static void enumeratePins (bool low_level, pin_info_ptr pin_info, void *data)
 static void digital_out (uint8_t portnum, bool on)
 {
     if(portnum == PLASMA_THC_DISABLE_PORT) {
-        thc_disabled = on;
+        job.thc_disabled = on;
         if(thc.arc_ok && mode != Plasma_ModeArcOK) {
-            if(!(thc.enabled = !thc_disabled))
+            if(!(thc.enabled = !job.thc_disabled))
                 stateHandler = state_arc_monitor;
             else
                 stateHandler = mode == Plasma_ModeUpDown ? state_thc_adjust : state_thc_pid;
@@ -430,6 +396,48 @@ static void add_virtual_ports (void *data)
     }
 }
 
+// --- Virtual ports end
+
+// --- Materials handling start
+
+static void set_job_params (material_t *material)
+{
+    uint_fast8_t idx;
+
+    job.id = material ? material->id : -1;
+    job.thc_disabled = (material && !material->thc_status) || plasma.mode == Plasma_ModeOff || plasma.mode == Plasma_ModeArcOK;
+
+    if(material) {
+
+        for(idx = 0; idx < sizeof(job.params) / sizeof(float); idx++)
+            job.params[idx] = material->params[idx];
+
+        if(!isnanf(material->cut_mode) && cutter.set_cut_mode)
+            cutter.set_cut_mode((uint16_t)material->cut_mode);
+
+        if(!isnanf(material->cut_amps) && cutter.set_current)
+            cutter.set_current(material->cut_amps);
+
+        if(!isnanf(material->gas_pressure) && cutter.set_pressure)
+            cutter.set_pressure(material->gas_pressure);
+
+#if NGC_EXPRESSIONS_ENABLE
+        ngc_named_param_set("_hal[plasmac.cut-feed-rate]", job.feed_rate);
+#endif
+    } else {
+
+        for(idx = 0; idx < sizeof(job.params) / sizeof(float); idx++)
+            job.params[idx] = NAN;
+
+        job.pierce_height = plasma.pierce_height;
+        job.pierce_delay = plasma.pierce_delay;
+        job.pause_at_end = plasma.pause_at_end;
+    }
+
+    if(material && *material->name)
+        report_message(material->name, Message_Info);
+}
+
 static material_t *find_material (uint32_t id)
 {
     material_t *material = materials, *found = NULL;
@@ -470,34 +478,105 @@ static status_code_t mcode_validate (parser_block_t *gc_block)
 
 static void mcode_execute (uint_fast16_t state, parser_block_t *gc_block)
 {
-    if(gc_block->user_mcode == Plasma_SelectMaterial) {
-        if((material = gc_block->values.p == -1.0f ? NULL : find_material((uint32_t)gc_block->values.p))) {
-            char command[30];
-            sprintf(command, "G1Z%.3fF%.1f", material->pierce_height, material->feed_rate);
-//            grbl.enqueue_gcode(command);
-        }
-    } else if(user_mcode.execute)
+    if(gc_block->user_mcode == Plasma_SelectMaterial)
+        set_job_params(gc_block->values.p == -1.0f ? NULL : find_material((uint32_t)gc_block->values.p));
+    else if(user_mcode.execute)
         user_mcode.execute(state, gc_block);
+}
+
+bool plasma_enumerate_materials (plasma_enumerate_materials_callback_ptr callback, void *data)
+{
+    bool ok = false;
+    material_t *material = materials;
+
+    if(job.id == tmp_material.id)
+        ok = callback(&tmp_material, data);
+
+    if(!ok && material) do {
+        ok = callback(material, data);
+    } while(!ok && (material = material->next));
+
+    return ok;
+}
+
+bool plasma_material_is_valid (material_t *material)
+{
+    return !(material->id < 0 ||
+              material->id >= PLASMA_TMP_MATERIAL_ID_START ||
+               isnanf(material->pierce_height) ||
+                isnanf(material->pierce_delay) ||
+                 isnanf(material->cut_height) ||
+                  isnanf(material->feed_rate));
+}
+
+bool plasma_material_add (material_t *material, bool overwrite)
+{
+    material_t *m = find_material(material->id), *next = m ? m->next : NULL;
+    bool add = m == NULL;
+
+    if(overwrite || m == NULL) {
+        if(m == NULL)
+            m = malloc(sizeof(material_t));
+        if(m) {
+            memcpy(m, material, sizeof(material_t));
+            m->next = next;
+            if(materials == NULL)
+                materials = m;
+            else if(add) {
+                material_t *last = materials;
+                while(last->next)
+                    last = last->next;
+                last->next = m;
+            }
+        } // else error....
+    }
+
+    return true;
+}
+
+static bool ml_enumerate (material_t *material, void *data)
+{
+    uint_fast8_t i;
+    char lbl[3], el[]= "|  :";
+
+    hal.stream.write("[MATERIAL:o:");
+    hal.stream.write(uitoa(material->id >= PLASMA_TMP_MATERIAL_ID_START ? 0 : 2));
+    hal.stream.write("|nu:");
+    hal.stream.write(uitoa(material->id));
+    if(*material->name) {
+        hal.stream.write("|na:");
+        hal.stream.write(material->name);
+    }
+    hal.stream.write("|th:");
+    hal.stream.write(uitoa(material->thc_status));
+
+    for(i = 0; i < sizeof(material->params) / sizeof(float); i++) {
+        if(!isnanf(material->params[i])) {
+            strgetentry(lbl, params, i, ',');
+            el[1] = lbl[0];
+            el[2] = lbl[1];
+            hal.stream.write(el);
+            hal.stream.write(trim_float(ftoa(material->params[i], ngc_float_decimals())));
+        }
+    }
+    hal.stream.write("]" ASCII_EOL);
+
+    return false;
 }
 
 static status_code_t onGcodeComment (char *comment)
 {
-    static const char params[] = "ph,pd,ch,fr,kw,ca,cv,pe,gp,cm,jh,jd,nu,na,th"; // NOTE: must match layout of material_t
-
     status_code_t status = Status_OK;
 
     if(strlen(comment) > 5 && comment[0] == 'o' && comment[1] == '=') {
 
-        material_t new_material = {};
         char option = comment[2];
+        material_t material = {};
 
         uint_fast8_t i;
 
-        if(option == '0')
-            new_material.id = mat_number++;
-
-        for(i = 0; i < 12; i++)
-            new_material.params[i] = NAN;
+        for(i = 0; i < sizeof(material.params) / sizeof(float); i++)
+            material.params[i] = NAN;
 
         char *param = strtok(comment + 4, ","), *eq;
 
@@ -520,24 +599,25 @@ static status_code_t onGcodeComment (char *comment)
 
                     case 12:
                         if(option != '0') {
+                            uint32_t id;
                             uint_fast8_t cc = 1;
-                            status = read_uint(eq, &cc, &new_material.id);
+                            if((status = read_uint(eq, &cc, &id)) == Status_OK)
+                                material.id = (int32_t)id;
                         }
                         break;
 
                     case 13:
-                        strncpy(new_material.name, eq + 1, sizeof(new_material.name));
-                        new_material.name[sizeof(new_material.name) - 1] = '\0';
+                        strncpy(material.name, eq + 1, sizeof(material.name) - 1);
                         break;
 
                     case 14:
-                        new_material.thc_status = eq[1] != '0';
+                        material.thc_status = eq[1] != '0';
                         break;
 
                     default:
                         {
                             uint_fast8_t cc = 1;
-                            if(!read_float(eq, &cc, &new_material.params[p]))
+                            if(!read_float(eq, &cc, &material.params[p]))
                                 status = Status_BadNumberFormat;
                         }
                         break;
@@ -547,38 +627,20 @@ static status_code_t onGcodeComment (char *comment)
             param = strtok(NULL, ",");
         }
 
-        if(isnanf(new_material.pierce_height) ||
-            isnanf(new_material.pierce_delay) ||
-             isnanf(new_material.cut_height) ||
-              isnanf(new_material.feed_rate))
+        if(status == Status_OK && !plasma_material_is_valid(&material))
             status = Status_GcodeValueWordMissing;
 
         if(status == Status_OK) switch(option) {
 
             case '0':
-                material = &tmp_material;
-                memcpy(material, &new_material, sizeof(material_t));
+                material.id = material_id++;
+                memcpy(&tmp_material, &material, sizeof(material_t));
+                set_job_params(&tmp_material);
                 break;
 
             case '1':
             case '2':
-                material_t *m = find_material(new_material.id);
-                bool add = m == NULL;
-                if(option == '2' || m == NULL) {
-                    if(m == NULL)
-                        m = malloc(sizeof(material_t));
-                    if(m) {
-                        memcpy(m, &new_material, sizeof(material_t));
-                        if(materials == NULL)
-                            materials = m;
-                        else if(add) {
-                            material_t *last = materials;
-                            while(last->next)
-                                last = last->next;
-                            last->next = m;
-                        }
-                    } // else error....
-                }
+                plasma_material_add(&material, option == '2');
                 break;
 
             default:
@@ -592,7 +654,27 @@ static status_code_t onGcodeComment (char *comment)
     return status;
 }
 
-// --- Virtual ports end
+// --- Materials handling end
+
+static bool moveto (float z_position)
+{
+    bool ok;
+    coord_data_t target;
+    plan_line_data_t plan_data;
+
+    plan_data_init(&plan_data);
+    plan_data.condition.rapid_motion = On;
+
+    system_convert_array_steps_to_mpos(target.values, sys.position);
+
+    target.z = z_position + gc_get_offset(Z_AXIS, false);
+    if((ok = mc_line(target.values, &plan_data))) {
+        protocol_buffer_synchronize();
+        sync_position();
+    }
+
+    return ok;
+}
 
 static void set_target_voltage (float v)
 {
@@ -635,7 +717,7 @@ static void state_thc_delay (void)
 {
     if(hal.get_elapsed_ticks() >= thc_delay) {
 
-        if(!(thc.enabled = !(thc_disabled || mode == Plasma_ModeArcOK)))
+        if(!(thc.enabled = !(job.thc_disabled || mode == Plasma_ModeArcOK)))
             stateHandler = state_arc_monitor;
         else if(mode == Plasma_ModeUpDown) {
             step_count = 0;
@@ -643,8 +725,8 @@ static void state_thc_delay (void)
         } else {
             pidf_reset(&pid);
             st2_set_position(z_motor, 0LL);
-            if(material && !isnanf(material->cut_voltage))
-                set_target_voltage(material->cut_voltage);
+            if(!isnanf(job.cut_voltage))
+                set_target_voltage(job.cut_voltage);
             else
                 set_target_voltage(parc_voltage.get_value(&parc_voltage) * plasma.arc_voltage_scale - plasma.arc_voltage_offset);
             stateHandler = state_vad_lock;
@@ -787,21 +869,31 @@ static void arcSetState (spindle_ptrs_t *spindle, spindle_state_t state, float r
     }
 
     if(!state.on) {
-        if(plasma.pause_at_end > 0.0f)
-            delay_sec(plasma.pause_at_end, DelayMode_Dwell);
+
+        if(!isnanf(job.pause_at_end))
+            delay_sec(job.pause_at_end, DelayMode_Dwell);
         spindle_set_state_(spindle, state, rpm);
         thc.torch_on = thc.arc_ok = thc.enabled = Off;
         stateHandler = state_idle;
+
     } else {
+
         uint_fast8_t retries = plasma.arc_retries;
+
+        if(job.pierce_height != 0.0f)
+            moveto(job.pierce_height);
+
         do {
             spindle_set_state_(spindle, state, rpm);
             thc.torch_on = On;
             report_message("arc on", Message_Plain);
             if((thc.arc_ok = hal.port.wait_on_input(Port_Digital, port_arc_ok, WaitMode_High, plasma.arc_fail_timeout) != -1)) {
                 report_message("arc ok", Message_Plain);
+                delay_sec(job.pierce_delay, DelayMode_Dwell);
+                if(!isnanf(job.cut_height))
+                    moveto(job.cut_height);
                 retries = 0;
-                thc_delay = hal.get_elapsed_ticks() + (uint32_t)ceilf(1000.0f * (material ? material->pierce_delay : plasma.thc_delay)); // handle overflow!
+                thc_delay = hal.get_elapsed_ticks() + (uint32_t)ceilf(1000.0f * plasma.thc_delay); // handle overflow!
                 stateHandler = state_thc_delay;
             } else if(!(--retries)) {
                 thc.torch_on = Off;
@@ -1179,6 +1271,8 @@ static void plasma_settings_load (void)
 
     if(init_ok) {
 
+        set_job_params(NULL);
+
         updown_enabled = mode == Plasma_ModeUpDown;
 
         settings_changed = hal.settings_changed;
@@ -1196,6 +1290,13 @@ static void plasma_settings_load (void)
 static void on_settings_changed (settings_t *settings, settings_changed_flags_t changed)
 {
     pidf_init(&pid, &plasma.pid);
+}
+
+static status_code_t matlist (sys_state_t state, char *args)
+{
+    plasma_enumerate_materials(ml_enumerate, NULL);
+
+    return Status_OK;
 }
 
 static void onReportOptions (bool newopt)
@@ -1218,7 +1319,7 @@ static void onReportOptions (bool newopt)
         *s1++ = ')';
         *s1 = '\0';
 
-        report_plugin(buf, "0.19");
+        report_plugin(buf, "0.20");
 
     } else if(mode != Plasma_ModeOff)
         hal.stream.write(",THC");
@@ -1241,6 +1342,15 @@ void plasma_init (void)
         .on_changed = on_settings_changed
     };
 
+    static const sys_command_t thc_command_list[] = {
+        {"EM", matlist, { .allow_blocking = On, .noargs = On }, { .str = "outputs plasma materials list" } }
+    };
+
+    static sys_commands_t thc_commands = {
+        .n_commands = sizeof(thc_command_list) / sizeof(sys_command_t),
+        .commands = thc_command_list
+    };
+
     bool ok;
 
     if((ok = !!hal.stepper.output_step && ioport_can_claim_explicit())) {
@@ -1261,6 +1371,7 @@ void plasma_init (void)
         strcpy(max_dport, uitoa(n_din - 1));
 
         settings_register(&setting_details);
+        system_register_commands(&thc_commands);
 
         memcpy(&user_mcode, &grbl.user_mcode, sizeof(user_mcode_ptrs_t));
 
@@ -1284,6 +1395,10 @@ void plasma_init (void)
 
         if(n_din < 3)
             setting_remove_elements(Setting_THC_Mode, 0b1011);
+
+        // Load materials
+        sheetcam_init();
+        linuxcnc_init();
 
     } else
         protocol_enqueue_foreground_task(report_warning, "Plasma mode failed to initialize!");
