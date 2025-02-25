@@ -36,7 +36,7 @@
 
 static on_vfs_mount_ptr on_vfs_mount;
 
-static void load_tools (const char *path, const vfs_t *fs)
+static void load_tools (const char *path, const vfs_t *fs, vfs_st_mode_t mode)
 {
     // NOTE: must match layout of material_t
     static const char params[] = "PIERCE_HEIGHT,PIERCE_DELAY,CUT_SPEED,CUT_HEIGHT,CUT_VOLTS,PAUSE_AT_END,KERF_WIDTH,CUT_AMPS,GAS_PRESSURE,CUT_MODE,PUDDLE_JUMP_HEIGHT,PUDDLE_JUMP_DELAY,-,NAME,THC";
@@ -92,6 +92,10 @@ static void load_tools (const char *path, const vfs_t *fs)
 
                     switch((p = strlookup(strtok(buf, " "), params, ','))) {
 
+                        case -1:
+                            status = Status_GcodeUnsupportedCommand;
+                            break;
+
                         case 13:
                             strncpy(material.name, eq, sizeof(material.name) - 1);
                             material.name[sizeof(material.name) - 1] = '\0';
@@ -122,7 +126,7 @@ static void load_tools (const char *path, const vfs_t *fs)
     }
 
     if(on_vfs_mount)
-        on_vfs_mount(path, fs);
+        on_vfs_mount(path, fs, mode);
 }
 
 void linuxcnc_init (void)

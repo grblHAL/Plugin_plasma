@@ -36,7 +36,7 @@
 
 static on_vfs_mount_ptr on_vfs_mount;
 
-static void load_tools (const char *path, const vfs_t *fs)
+static void load_tools (const char *path, const vfs_t *fs, vfs_st_mode_t mode)
 {
     static const char params[] = "Pierce\\ height,Pierce\\ delay,Feed\\ rate,Cut\\ height,cv,Pause\\ at\\ end\\ of\\ cut,Kerf\\ width,ca,gp,cm,jh,jd,Tool\\ number,Name,th"; // NOTE: must match layout of material_t
 
@@ -59,6 +59,7 @@ static void load_tools (const char *path, const vfs_t *fs)
                        if(status == Status_OK && plasma_material_is_valid(&material))
                            plasma_material_add(&material, true);
 
+                       material.id = -1;
                        *material.name = '\0';
                        status = Status_GcodeUnusedWords;
 
@@ -74,6 +75,9 @@ static void load_tools (const char *path, const vfs_t *fs)
                     *eq = '\0';
 
                     switch((p = strlookup(buf, params, ','))) {
+
+                        case -1:
+                            break;
 
                         case 12:
                             {
@@ -113,7 +117,7 @@ static void load_tools (const char *path, const vfs_t *fs)
     }
 
     if(on_vfs_mount)
-        on_vfs_mount(path, fs);
+        on_vfs_mount(path, fs, mode);
 }
 
 void sheetcam_init (void)
