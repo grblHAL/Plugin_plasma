@@ -41,6 +41,7 @@
 #include "grbl/state_machine.h"
 #include "grbl/strutils.h"
 #include "grbl/motion_control.h"
+#include "grbl/task.h"
 #if NGC_EXPRESSIONS_ENABLE
 #include "grbl/ngc_expr.h"
 #endif
@@ -1279,12 +1280,12 @@ static void plasma_settings_load (void)
         hal.settings_changed = plasma_setup;
 
         if(plasma.mode != mode)
-            protocol_enqueue_foreground_task(report_warning, "Plasma mode changed due to lack of inputs!");
+            task_run_on_startup(report_warning, "Plasma mode changed due to lack of inputs!");
 
         if(plasma.option.virtual_ports)
-            protocol_enqueue_foreground_task(add_virtual_ports, NULL);
+            task_run_on_startup(add_virtual_ports, NULL);
     } else
-        protocol_enqueue_foreground_task(report_warning, "Plasma mode failed to initialize!");
+        task_run_on_startup(report_warning, "Plasma mode failed to initialize!");
 }
 
 static void on_settings_changed (settings_t *settings, settings_changed_flags_t changed)
@@ -1319,7 +1320,7 @@ static void onReportOptions (bool newopt)
         *s1++ = ')';
         *s1 = '\0';
 
-        report_plugin(buf, "0.20");
+        report_plugin(buf, "0.21");
 
     } else if(mode != Plasma_ModeOff)
         hal.stream.write(",THC");
@@ -1401,7 +1402,7 @@ void plasma_init (void)
         linuxcnc_init();
 
     } else
-        protocol_enqueue_foreground_task(report_warning, "Plasma mode failed to initialize!");
+        task_run_on_startup(report_warning, "Plasma mode failed to initialize!");
 }
 
 #endif // PLASMA_ENABLE
