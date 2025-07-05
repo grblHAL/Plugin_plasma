@@ -187,7 +187,6 @@ static const char params[] = "ph,pd,fr,ch,cv,pe,kw,ca,gp,cm,jh,jd,nu,na,th"; // 
 
 // --- Virtual ports start
 
-static io_port_t rport = {0};
 static io_ports_data_t digital, analog;
 
 typedef struct {
@@ -296,9 +295,46 @@ static void enumeratePins (bool low_level, pin_info_ptr pin_info, void *data)
     pin_info(&pin, data);
 }
 
+static bool analog_out (uint8_t portnum, float value)
+{
+    portnum -= analog.out.n_ports - 1;
+
+    if(portnum == 0) { // PLASMA_FEED_OVERRIDE_PORT
+        // Let the foreground process handle this
+        set_feed_override = true;
+        feed_override = (uint_fast8_t)value;
+        if(feed_override < 10 || feed_override > 100)
+            feed_override = 100;
+    }
+
+    return true;
+}
+
+static xbar_t *get_apin_info (io_port_direction_t dir, uint8_t port)
+{
+    static xbar_t pin = {0};
+
+    xbar_t *info = NULL;
+
+    if(port < analog.out.n_ports) {
+
+        pin.id = pin.pin = port;
+        pin.cap.output = pin.cap.analog = On;
+        pin.cap.claimable = Off;
+        pin.mode.output = pin.cap.analog = On;
+        pin.description = "THC feed override";
+
+        info = &pin;
+    }
+
+    return info;
+}
+
 static void digital_out (uint8_t portnum, bool on)
 {
-    if(portnum == PLASMA_THC_DISABLE_PORT) {
+    portnum -= digital.out.n_ports - 2;
+
+    if(portnum == 0) { // PLASMA_THC_DISABLE_PORT
         job.thc_disabled = on;
         if(thc.arc_ok && mode != Plasma_ModeArcOK) {
             if(!(thc.enabled = !job.thc_disabled))
@@ -306,63 +342,34 @@ static void digital_out (uint8_t portnum, bool on)
             else
                 stateHandler = mode == Plasma_ModeUpDown ? state_thc_adjust : state_thc_pid;
         }
-    } else if(portnum == PLASMA_TORCH_DISABLE_PORT) {
-        // PLASMA_TORCH_DISABLE_PORT:
+    } else if(portnum == 1) { // PLASMA_TORCH_DISABLE_PORT:
         // TODO
-    } else if(rport.digital_out)
-        rport.digital_out(portnum, on);
+    }
 }
 
-static bool analog_out (uint8_t portnum, float value)
+static xbar_t *get_dpin_info (io_port_direction_t dir, uint8_t port)
 {
-    if(portnum == PLASMA_FEED_OVERRIDE_PORT) {
-        // Let the foreground process handle this
-        set_feed_override = true;
-        feed_override = (uint_fast8_t)value;
-        if(feed_override < 10 || feed_override > 100)
-            feed_override = 100;
-    } else
-        return rport.analog_out ? rport.analog_out(portnum, value) : false;
+    static xbar_t pin = {0};
 
-    return true;
-}
+    xbar_t *info = NULL;
 
-static xbar_t *get_pin_info (io_port_type_t type, io_port_direction_t dir, uint8_t port)
-{
-    static xbar_t pin;
+    if(port < digital.out.n_ports) {
 
-    xbar_t *info = rport.get_pin_info(type, dir, port);
+        pin.id = pin.pin = port;
+        pin.cap.output = On;
+        pin.cap.claimable = Off;
+        pin.mode.output = On;
+        pin.description = port == digital.out.n_start ? "THC enable/disable" : "THC torch control";
 
-    if(info == NULL && dir == Port_Output) {
-
-        if(type == Port_Digital && port >= digital.out.n_start && port < digital.out.n_start + digital.out.n_ports) {
-
-            memset(&pin, 0, sizeof(xbar_t));
-
-            pin.id = pin.pin = port;
-            pin.cap.output = On;
-            pin.cap.claimable = Off;
-            pin.mode.output = On;
-            pin.description = port == digital.out.n_start ? "THC enable/disable" : "THC torch control";
-
-            return &pin;
-        }
-
-        if(type == Port_Analog && port >= analog.out.n_start && port < analog.out.n_start + analog.out.n_ports) {
-
-            memset(&pin, 0, sizeof(xbar_t));
-
-            pin.id = pin.pin = port;
-            pin.cap.output = pin.cap.analog = On;
-            pin.cap.claimable = Off;
-            pin.mode.output = pin.cap.analog = On;
-            pin.description = "THC feed override";
-
-            return &pin;
-        }
+        info = &pin;
     }
 
     return info;
+}
+
+static void set_pin_description (io_port_direction_t dir, uint8_t port, const char *s)
+{
+    // NOOP
 }
 
 static void add_virtual_ports (void *data)
@@ -384,17 +391,42 @@ static void add_virtual_ports (void *data)
     if(!pin_stat.aux_aout2)
         aux_aout++;
 
-    if(ioports_add(&digital, Port_Digital, 0, aux_dout) && ioports_add(&analog, Port_Analog, 0, aux_aout))  {
+    if(aux_aout) {
 
-        memcpy(&rport, &hal.port, sizeof(io_port_t));
+        analog.out.n_ports = aux_aout;
 
-        hal.port.digital_out = digital_out;
-        hal.port.analog_out = analog_out;
-        hal.port.get_pin_info = get_pin_info;
+        io_analog_t ports = {
+            .ports = &analog,
+            .analog_out = analog_out,
+            .get_pin_info = get_apin_info,
+            .set_pin_description = set_pin_description
+        };
 
-        enumerate_pins = hal.enumerate_pins;
-        hal.enumerate_pins = enumeratePins;
+        if(ioports_add_analog(&ports) && digital.out.n_start > 0)
+            ioport_remap(Port_Analog, Port_Output, digital.out.n_start + aux_aout - 1, PLASMA_FEED_OVERRIDE_PORT);
     }
+
+    if(aux_dout) {
+
+        digital.out.n_ports = aux_dout;
+
+        io_digital_t ports = {
+            .ports = &digital,
+            .digital_out = digital_out,
+            .get_pin_info = get_dpin_info,
+            .set_pin_description = set_pin_description
+        };
+
+        if(ioports_add_digital(&ports)) {
+            if(digital.out.n_start > 2) {
+                ioport_remap(Port_Digital, Port_Output, digital.out.n_start + aux_dout - 2, PLASMA_THC_DISABLE_PORT);
+                ioport_remap(Port_Digital, Port_Output, digital.out.n_start + aux_dout - 1, PLASMA_TORCH_DISABLE_PORT);
+            }
+        }
+    }
+
+    enumerate_pins = hal.enumerate_pins;
+    hal.enumerate_pins = enumeratePins;
 }
 
 // --- Virtual ports end
@@ -1152,8 +1184,6 @@ PROGMEM static const setting_detail_t plasma_settings[] = {
     { Setting_THC_Options, Group_Plasma, "Plasma options", NULL, Format_Bitfield, "Virtual ports,Sync Z position", NULL, NULL, Setting_NonCore, &plasma.option.flags, NULL, NULL, { .reboot_required = On } },
 };
 
-#ifndef NO_SETTINGS_DESCRIPTIONS
-
 PROGMEM static const setting_descr_t plasma_settings_descr[] = {
     { Setting_THC_Mode, "" },
     { Setting_THC_Delay, "Delay from cut start until THC activates." },
@@ -1181,8 +1211,6 @@ PROGMEM static const setting_descr_t plasma_settings_descr[] = {
     { Setting_THC_CutterUpPort, "Aux port number to use for cutter up signal. Set to -1 to disable." },
     { Setting_THC_Options, "" }
 };
-
-#endif
 
 static void plasma_settings_save (void)
 {
@@ -1320,7 +1348,7 @@ static void onReportOptions (bool newopt)
         *s1++ = ')';
         *s1 = '\0';
 
-        report_plugin(buf, "0.21");
+        report_plugin(buf, "0.22");
 
     } else if(mode != Plasma_ModeOff)
         hal.stream.write(",THC");
@@ -1333,10 +1361,8 @@ void plasma_init (void)
         .n_groups = sizeof(plasma_groups) / sizeof(setting_group_detail_t),
         .settings = plasma_settings,
         .n_settings = sizeof(plasma_settings) / sizeof(setting_detail_t),
-    #ifndef NO_SETTINGS_DESCRIPTIONS
         .descriptions = plasma_settings_descr,
         .n_descriptions = sizeof(plasma_settings_descr) / sizeof(setting_descr_t),
-    #endif
         .save = plasma_settings_save,
         .load = plasma_settings_load,
         .restore = plasma_settings_restore,
