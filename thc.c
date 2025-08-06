@@ -195,40 +195,81 @@ typedef struct {
     void *data;
     bool aux_dout0;
     bool aux_dout1;
+    pin_function_t aux_dout2;
+    pin_function_t aux_dout3;
     bool aux_aout0;
     bool aux_aout1;
     bool aux_aout2;
+    pin_function_t aux_aout3;
 } pin_stat_t;
+
+static pin_stat_t pin_stat = {};
+
+static const char *add_comment (const char *description, char *new_descr)
+{
+    size_t len;
+
+    if((len = strlen(description)) <= 3) {
+        if(len == 2)
+            new_descr++;
+        do {
+            len--;
+            new_descr[len] = description[len];
+        } while(len);
+
+    } else
+        new_descr = (char *)description;
+
+    return (const char *)new_descr;
+}
 
 static void enum_trap (xbar_t *pin, void *data)
 {
-    ((pin_stat_t *)data)->pin_id = max(((pin_stat_t *)data)->pin_id, pin->id);
+    static char remap[3][30] = {
+        { "   , remapped from P2 by THC" },
+        { "   , remapped from P3 by THC" },
+        { "   , remapped from E3 by THC" }
+    };
 
-    if(pin->function == Output_Aux0)
-        ((pin_stat_t *)data)->aux_dout0 = true;
-    else if(pin->function == Output_Aux1)
-        ((pin_stat_t *)data)->aux_dout1 = true;
-    else if(pin->function == Output_Analog_Aux0)
-        ((pin_stat_t *)data)->aux_aout0 = true;
-    else if(pin->function == Output_Analog_Aux1)
-        ((pin_stat_t *)data)->aux_aout1 = true;
-    else if(pin->function == Output_Analog_Aux2)
-        ((pin_stat_t *)data)->aux_aout2 = true;
+    if(((pin_stat_t *)data)->pin_info) {
+ 
+        if(pin->group == PinGroup_AuxOutput) {
+            if(pin->function == ((pin_stat_t *)data)->aux_dout2)
+                pin->description = add_comment(pin->description, remap[0]);
+            if(pin->function == ((pin_stat_t *)data)->aux_dout3)
+                pin->description = add_comment(pin->description, remap[1]);
+        } else if(pin->group == PinGroup_AuxOutputAnalog && pin->function == ((pin_stat_t *)data)->aux_aout3)
+             pin->description = add_comment(pin->description, remap[2]);
 
-    if((pin->function == Output_Aux2 || pin->function == Output_Aux3 || pin->function == Output_Analog_Aux3))
-        pin->description = "Shadowed by THC";
-
-    if(((pin_stat_t *)data)->pin_info)
         ((pin_stat_t *)data)->pin_info(pin, ((pin_stat_t *)data)->data);
+        ((pin_stat_t *)data)->pin_id = max(((pin_stat_t *)data)->pin_id, pin->id);
+
+     } else if(pin->group == PinGroup_AuxOutput || pin->group == PinGroup_AuxOutputAnalog) {
+
+        if(!strcmp(pin->description, "P0"))
+            ((pin_stat_t *)data)->aux_dout0 = true;
+        else if(!strcmp(pin->description, "P1"))
+            ((pin_stat_t *)data)->aux_dout1 = true;
+        else if(!strcmp(pin->description, "P2"))
+            ((pin_stat_t *)data)->aux_dout2 = pin->function;
+        else if(!strcmp(pin->description, "P3"))
+            ((pin_stat_t *)data)->aux_dout3 = pin->function;
+        else if(!strcmp(pin->description, "E0"))
+            ((pin_stat_t *)data)->aux_aout0 = true;
+        else if(!strcmp(pin->description, "E1"))
+            ((pin_stat_t *)data)->aux_aout1 = true;
+        else if(!strcmp(pin->description, "E2"))
+            ((pin_stat_t *)data)->aux_aout2 = true;
+        else if(!strcmp(pin->description, "E3"))
+            ((pin_stat_t *)data)->aux_aout3 = pin->function;
+    }
 }
 
 static void enumeratePins (bool low_level, pin_info_ptr pin_info, void *data)
 {
-    pin_stat_t pin_stat = {
-        .pin_id = 0,
-        .pin_info = pin_info,
-        .data = data
-    };
+    pin_stat.pin_id = 0;
+    pin_stat.pin_info = pin_info;
+    pin_stat.data = data;
 
     static xbar_t pin = {
         .id = 0,
@@ -375,7 +416,9 @@ static void set_pin_description (io_port_direction_t dir, uint8_t port, const ch
 static void add_virtual_ports (void *data)
 {
     uint8_t aux_dout = 2, aux_aout = 1;
-    pin_stat_t pin_stat = {};
+ 
+    pin_stat.pin_info = NULL;
+    pin_stat.aux_aout3 = pin_stat.aux_dout2 = pin_stat.aux_dout3 = Virtual_Pin;
 
     if(hal.enumerate_pins)
         hal.enumerate_pins(false, enum_trap, &pin_stat);
@@ -403,7 +446,7 @@ static void add_virtual_ports (void *data)
         };
 
         if(ioports_add_analog(&ports) && digital.out.n_start > 0)
-            ioport_remap(Port_Analog, Port_Output, digital.out.n_start + aux_aout - 1, PLASMA_FEED_OVERRIDE_PORT);
+            ioport_remap(Port_Analog, Port_Output, analog.out.n_start + aux_aout - 1, PLASMA_FEED_OVERRIDE_PORT);
     }
 
     if(aux_dout) {
@@ -417,11 +460,9 @@ static void add_virtual_ports (void *data)
             .set_pin_description = set_pin_description
         };
 
-        if(ioports_add_digital(&ports)) {
-            if(digital.out.n_start > 2) {
-                ioport_remap(Port_Digital, Port_Output, digital.out.n_start + aux_dout - 2, PLASMA_THC_DISABLE_PORT);
-                ioport_remap(Port_Digital, Port_Output, digital.out.n_start + aux_dout - 1, PLASMA_TORCH_DISABLE_PORT);
-            }
+        if(ioports_add_digital(&ports) && digital.out.n_start > 2) {
+            ioport_remap(Port_Digital, Port_Output, digital.out.n_start + aux_dout - 2, PLASMA_THC_DISABLE_PORT);
+            ioport_remap(Port_Digital, Port_Output, digital.out.n_start + aux_dout - 1, PLASMA_TORCH_DISABLE_PORT);
         }
     }
 
@@ -1348,7 +1389,7 @@ static void onReportOptions (bool newopt)
         *s1++ = ')';
         *s1 = '\0';
 
-        report_plugin(buf, "0.22");
+        report_plugin(buf, "0.23");
 
     } else if(mode != Plasma_ModeOff)
         hal.stream.write(",THC");
