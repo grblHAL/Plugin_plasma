@@ -503,7 +503,7 @@ static void set_job_params (material_t *material)
         for(idx = 0; idx < sizeof(job.params) / sizeof(float); idx++)
             job.params[idx] = NAN;
 
-        job.pierce_height = plasma.pierce_height;
+        job.pierce_height = 0.0f; // TODO: add setting for plasma.pierce_height;
         job.pierce_delay = plasma.pierce_delay;
         job.pause_at_end = plasma.pause_at_end;
     }
@@ -761,7 +761,7 @@ static void set_target_voltage (float v)
 static void pause_on_error (void)
 {
     stateHandler = state_idle;
-    system_set_exec_state_flag(EXEC_FEED_HOLD);   // Set up program pause for manual tool change
+    system_set_exec_state_flag(EXEC_FEED_HOLD);     // Set up program pause for manual tool change
 //    system_set_exec_state_flag(EXEC_TOOL_CHANGE);   // Set up program pause for manual tool change
     protocol_execute_realtime();                    // Execute...
 }
@@ -772,6 +772,21 @@ static void state_idle (void)
 {
     if(mode == Plasma_ModeVoltage)
         arc_voltage = parc_voltage.get_value(&parc_voltage) * plasma.arc_voltage_scale - plasma.arc_voltage_offset;
+
+    thc.arc_ok = arc_ok.get_value(&arc_ok) == 1.0f;
+
+    if(updown_enabled) {
+        thc.up = thc.report_up = cutter_up.get_value(&cutter_up) == 1.0f;
+        thc.down = thc.report_down = cutter_down.get_value(&cutter_down) == 1.0f;
+        if(hal.probe.get_state) {
+            thc.ohmic_probe = hal.probe.get_state().triggered;
+            if(hal.probe.select) {
+                hal.probe.select(Probe_Toolsetter);
+                thc.float_switch = hal.probe.get_state().triggered;
+                hal.probe.select(Probe_Default);
+            }
+        }
+    }
 
     if(plasma.option.sync_pos && state_get() == STATE_IDLE) {
 
