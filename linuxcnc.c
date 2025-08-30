@@ -39,7 +39,7 @@ static on_vfs_mount_ptr on_vfs_mount;
 static void load_tools (const char *path, const vfs_t *fs, vfs_st_mode_t mode)
 {
     // NOTE: must match layout of material_t
-    static const char params[] = "PIERCE_HEIGHT,PIERCE_DELAY,CUT_SPEED,CUT_HEIGHT,CUT_VOLTS,PAUSE_AT_END,KERF_WIDTH,CUT_AMPS,GAS_PRESSURE,CUT_MODE,PUDDLE_JUMP_HEIGHT,PUDDLE_JUMP_DELAY,-,NAME,THC";
+    static const char params[] = "PIERCE_HEIGHT,PIERCE_DELAY,CUT_SPEED,CUT_HEIGHT,CUT_VOLTS,PAUSE_AT_END,PUDDLE_JUMP_HEIGHT,PUDDLE_JUMP_DELAY,KERF_WIDTH,CUT_AMPS,GAS_PRESSURE,CUT_MODE,-,NAME,THC";
 
     char c, *eq, buf[100];
     uint_fast8_t idx = 0;

@@ -53,12 +53,12 @@ typedef struct material
             float cut_height;       // ch - mandatory
             float cut_voltage;      // cv
             float pause_at_end;     // pe
+            float jump_height;      // jh
+            float jump_delay;       // jd
             float kerf_width;       // kw
             float cut_amps;         // ca - PowerMax
             float gas_pressure;     // gp - PowerMax
             float cut_mode;         // cm - PowerMax
-            float jump_height;      // jh
-            float jump_delay;       // jd
         };
     };
     struct material *next;
