@@ -64,10 +64,18 @@ typedef enum {
     Plasma_ModeArcOK
 } plasma_mode_t;
 
-// float parameters must be in the same order as in material_t.
+typedef enum {
+    THC_None = 0,
+    THC_Up,
+    THC_Down
+} plasma_thc_t;
+
+// float params union variables must be in the same order as in material_t.
 typedef struct {
     int32_t id;
     bool thc_disabled;
+    bool arc_ok_ignore;
+    plasma_thc_t thc;
     float feed_factor;
     union {
         float params[8];
@@ -153,11 +161,9 @@ static void state_await_puddle_clear (void);
 plasma_control_t cutter = {};
 
 static bool set_feed_override = false, updown_enabled = false, init_ok = false;
-static uint8_t n_ain, n_din;
-static uint8_t port_arc_ok, port_arc_voltage;
+static uint8_t port_arc_ok;
 static uint_fast8_t feed_override, segment_id = 0;
 static uint32_t v_count = 0;
-static char max_aport[4], max_dport[4];
 static float arc_vref = 0.0f, arc_voltage = 0.0f, arc_voltage_low, arc_voltage_high; //, vad_threshold;
 static volatile float fr_actual;
 static float fr_pgm, fr_thr_99, fr_thr_vad;
@@ -170,6 +176,7 @@ static st2_motor_t *z_motor;
 static void (*volatile stateHandler)(void) = state_idle;
 static plasma_mode_t mode = Plasma_ModeOff;
 static xbar_t arc_ok, cutter_down, cutter_up, parc_voltage;
+static io_port_cfg_t a_in, d_in;
 static uint32_t material_id = PLASMA_TMP_MATERIAL_ID_START;
 static material_t *materials = NULL, tmp_material = { .id = -1 };
 static plasma_job_t job = {};
@@ -735,6 +742,11 @@ static status_code_t onGcodeComment (char *comment)
 
 // --- Materials handling end
 
+static inline float get_arc_voltage (void)
+{
+    return (parc_voltage.get_value(&parc_voltage) - plasma.arc_voltage_offset) * plasma.arc_voltage_scale;
+}
+
 static bool moveto (float z_position)
 {
     bool ok;
@@ -778,6 +790,7 @@ static void thc_start (void *data)
 
     else {
 
+        job.thc = THC_None;
         job.feed_factor = (float)plasma.feed_factor / 100.0f;
 
         if(updown_enabled)
@@ -787,7 +800,7 @@ static void thc_start (void *data)
             if(!isnanf(job.cut_voltage))
                 set_target_voltage(job.cut_voltage);
             else
-                set_target_voltage(parc_voltage.get_value(&parc_voltage) * plasma.arc_voltage_scale - plasma.arc_voltage_offset);
+                set_target_voltage(get_arc_voltage());
             stateHandler = state_pid_vad_lock;
         }
         stateHandler();
@@ -826,7 +839,7 @@ static void state_await_puddle_clear (void)
 static void state_idle (void)
 {
     if(mode == Plasma_ModeVoltage)
-        arc_voltage = parc_voltage.get_value(&parc_voltage) * plasma.arc_voltage_scale - plasma.arc_voltage_offset;
+        arc_voltage = get_arc_voltage();
 
     thc.arc_ok = arc_ok.get_value(&arc_ok) == 1.0f;
 
@@ -870,7 +883,7 @@ static void state_await_idle (void)
 
 static void state_arc_monitor (void)
 {
-    if(!(thc.arc_ok = arc_ok.get_value(&arc_ok) == 1.0f))
+    if(!((thc.arc_ok = arc_ok.get_value(&arc_ok) == 1.0f) || job.arc_ok_ignore))
         pause_on_error();
 }
 
@@ -882,7 +895,7 @@ static void state_updown_vad_lock (void)
 
 static void state_thc_updown (void)
 {
-    if((thc.arc_ok = arc_ok.get_value(&arc_ok) == 1.0f)) {
+    if((thc.arc_ok = arc_ok.get_value(&arc_ok) == 1.0f) || job.arc_ok_ignore) {
 
         if(!(thc.active = fr_actual >= fr_thr_vad)) {
             if(st2_motor_running(z_motor))
@@ -905,7 +918,10 @@ static void state_thc_updown (void)
 
 static void state_pid_vad_lock (void)
 {
-    arc_voltage = parc_voltage.get_value(&parc_voltage) * plasma.arc_voltage_scale - plasma.arc_voltage_offset;
+    arc_voltage = get_arc_voltage();
+
+    if(job.thc && !st2_motor_running(z_motor))
+        job.thc = THC_None;
 
     if((thc.active = fr_actual >= fr_thr_99))
         stateHandler = state_thc_pid;
@@ -914,18 +930,24 @@ static void state_pid_vad_lock (void)
 static void state_thc_pid (void)
 {
     static float v;
+    static bool stopped = false;
 
     if(!(thc.active = fr_actual >= fr_thr_vad)) {
+
         stateHandler = state_pid_vad_lock;
+
+        if(st2_motor_running(z_motor))
+            st2_motor_stop(z_motor);
+
         return;
     }
 
-    if((thc.arc_ok = arc_ok.get_value(&arc_ok)) == 1.0f) {
+    if((thc.arc_ok = arc_ok.get_value(&arc_ok)) == 1.0f || job.arc_ok_ignore) {
 
         if(v_count == 0)
             v = 0.0f;
 
-        arc_voltage = parc_voltage.get_value(&parc_voltage) * plasma.arc_voltage_scale - plasma.arc_voltage_offset;
+        arc_voltage = get_arc_voltage();
         v += arc_voltage;
         if(++v_count == THC_SAMPLE_AVG) {
 
@@ -933,19 +955,32 @@ static void state_thc_pid (void)
             v_count = 0;
 
             if(arc_voltage < arc_voltage_low || arc_voltage > arc_voltage_high) {
-                float err = pidf(&pid, arc_vref, arc_voltage, 1.0f);
-                if(!st2_motor_running(z_motor)) {
-/*
-                    char buf[50];
-                    strcpy(buf, ftoa(arc_vref, 1));
-                    strcat(buf, ",");
-                    strcat(buf, ftoa(arc_voltage, 1));
-                    strcat(buf, ",");
-                    strcat(buf, ftoa(err, 1));
-                    report_message(buf, Message_Info);
-*/
-                    st2_motor_move(z_motor, err * plasma.arc_height_per_volt, min(fr_actual, settings.axis[Z_AXIS].max_rate) * job.feed_factor, Stepper2_mm);
+
+                float err = pidf(&pid, arc_vref, arc_voltage, 5.0f);
+                plasma_thc_t thc = err > 0.0f ? THC_Up : THC_Down;
+
+                if(job.thc && thc != job.thc && st2_motor_running(z_motor) && !stopped)
+                    stopped = st2_motor_stop(z_motor);
+
+                else if(!st2_motor_running(z_motor)) {
+
+                    float move = err * plasma.arc_height_per_volt;
+#ifdef DEBUGOUT
+                    debug_printf("%.1f %.1f %.1f %.4f", arc_vref, arc_voltage, err, move);
+#endif
+                    stopped = false;
+                    job.thc = thc;
+                    st2_motor_move(z_motor, move, min(fr_actual, settings.axis[Z_AXIS].max_rate) * job.feed_factor, Stepper2_mm);
                 }
+
+
+            } else if(job.thc) {
+                if(!st2_motor_running(z_motor)) {
+                    stopped = false;
+                    job.thc = THC_None;
+                }
+              //  else
+              //      st2_motor_stop(z_motor);
             }
         }
 /*
@@ -1038,7 +1073,7 @@ static void arcSetState (spindle_ptrs_t *spindle, spindle_state_t state, float r
             thc.torch_on = On;
             report_message("arc on", Message_Plain);
  
-            if((thc.arc_ok = hal.port.wait_on_input(Port_Digital, port_arc_ok, WaitMode_High, plasma.arc_fail_timeout) != -1)) {
+            if((thc.arc_ok = ioport_wait_on_input(Port_Digital, port_arc_ok, WaitMode_High, plasma.arc_fail_timeout) != -1)) {
 
                 retries = 0;
                 stateHandler = state_wait;
@@ -1212,11 +1247,11 @@ static bool is_setting_available (const setting_detail_t *setting, uint_fast16_t
 
         case Setting_THC_CutterDownPort:
         case Setting_THC_CutterUpPort:
-            ok = n_din >= 3;
+            ok = d_in.n_ports >= 3;
             break;
 
         case Setting_Arc_VoltagePort:
-            ok = n_ain >= 1;
+            ok = a_in.n_ports >= 1;
             break;
 
         case Setting_THC_VADThreshold:
@@ -1234,25 +1269,24 @@ static bool is_setting_available (const setting_detail_t *setting, uint_fast16_t
 
 static status_code_t set_port (setting_id_t setting, float value)
 {
-    status_code_t status;
+    status_code_t status = Status_SettingDisabled;
 
-    if((status = isintf(value) ? Status_OK : Status_BadNumberFormat) == Status_OK)
-      switch(setting) {
+    switch(setting) {
 
         case Setting_Arc_VoltagePort:
-            plasma.port_arc_voltage = value < 0.0f ? 255 : (uint8_t)value;
+            status = a_in.set_value(&a_in, &plasma.port_arc_voltage, (pin_cap_t){}, value);
             break;
 
         case Setting_Arc_OkPort:
-            plasma.port_arc_ok = value < 0.0f ? 255 : (uint8_t)value;
+            status = d_in.set_value(&d_in, &plasma.port_arc_ok, (pin_cap_t){}, value);
             break;
 
         case Setting_THC_CutterDownPort:
-            plasma.port_cutter_down = value < 0.0f ? 255 : (uint8_t)value;
+            status = d_in.set_value(&d_in, &plasma.port_cutter_down, (pin_cap_t){}, value);
             break;
 
         case Setting_THC_CutterUpPort:
-            plasma.port_cutter_up = value < 0.0f ? 255 : (uint8_t)value;
+            status = d_in.set_value(&d_in, &plasma.port_cutter_up, (pin_cap_t){}, value);
             break;
 
         default:
@@ -1269,19 +1303,19 @@ static float get_port (setting_id_t setting)
     switch(setting) {
 
         case Setting_Arc_VoltagePort:
-            value = plasma.port_arc_voltage >= n_ain ? -1.0f : (float)plasma.port_arc_voltage;
+            value = a_in.get_value(&a_in, plasma.port_arc_voltage);
             break;
 
         case Setting_Arc_OkPort:
-            value = plasma.port_arc_ok >= n_din ? -1.0f : (float)plasma.port_arc_ok;
+            value = d_in.get_value(&d_in, plasma.port_arc_ok);
             break;
 
         case Setting_THC_CutterDownPort:
-            value = plasma.port_cutter_down >= n_din ? -1.0f : (float)plasma.port_cutter_down;
+            value = d_in.get_value(&d_in, plasma.port_cutter_down);
             break;
 
         case Setting_THC_CutterUpPort:
-            value = plasma.port_cutter_up >= n_din ? -1.0f : (float)plasma.port_cutter_up;
+            value = d_in.get_value(&d_in, plasma.port_cutter_up);
             break;
 
         default:
@@ -1303,15 +1337,15 @@ PROGMEM static const setting_detail_t plasma_settings[] = {
     { Setting_Arc_FailTimeout, Group_Plasma, "Plasma Arc fail timeout", "seconds", Format_Decimal, "#0.0", NULL, NULL, Setting_NonCore, &plasma.arc_fail_timeout, NULL, NULL },
     { Setting_Arc_RetryDelay, Group_Plasma, "Plasma Arc retry delay", "seconds", Format_Decimal, "#0.0", NULL, NULL, Setting_NonCore, &plasma.arc_retry_delay, NULL, NULL },
     { Setting_Arc_MaxRetries, Group_Plasma, "Plasma Arc max retries", NULL, Format_Int8, "#0", NULL, NULL, Setting_NonCore, &plasma.arc_retries, NULL, NULL },
-    { Setting_Arc_VoltageScale, Group_Plasma, "Plasma Arc voltage scale", NULL, Format_Decimal, "###0.000", NULL, NULL, Setting_NonCore, &plasma.arc_voltage_scale, NULL, is_setting_available },
+    { Setting_Arc_VoltageScale, Group_Plasma, "Plasma Arc voltage scale", NULL, Format_Decimal, "###0.000##", NULL, NULL, Setting_NonCore, &plasma.arc_voltage_scale, NULL, is_setting_available },
     { Setting_Arc_VoltageOffset, Group_Plasma, "Plasma Arc voltage offset", NULL, Format_Decimal, "###0.000", NULL, NULL, Setting_NonCore, &plasma.arc_voltage_offset, NULL, is_setting_available },
     { Setting_Arc_HeightPerVolt, Group_Plasma, "Plasma Arc height per volt", "mm", Format_Decimal, "###0.000", NULL, NULL, Setting_NonCore, &plasma.arc_height_per_volt, NULL, is_setting_available },
     { Setting_Arc_OkHighVoltage, Group_Plasma, "Plasma Arc ok high volts", "V", Format_Decimal, "###0.000", NULL, NULL, Setting_NonCore, &plasma.arc_ok_high_voltage, NULL, is_setting_available },
     { Setting_Arc_OkLowVoltage, Group_Plasma, "Plasma Arc ok low volts", "V", Format_Decimal, "###0.000", NULL, NULL, Setting_NonCore, &plasma.arc_ok_low_voltage, NULL, is_setting_available },
-    { Setting_Arc_VoltagePort, Group_AuxPorts, "Arc voltage port", NULL, Format_Decimal, "-#0", "-1", max_aport, Setting_NonCoreFn, set_port, get_port, is_setting_available, { .reboot_required = On } },
-    { Setting_Arc_OkPort, Group_AuxPorts, "Arc ok port", NULL, Format_Decimal, "-#0", "-1", max_dport, Setting_NonCoreFn, set_port, get_port, NULL, { .reboot_required = On } },
-    { Setting_THC_CutterDownPort, Group_AuxPorts, "Cutter down port", NULL, Format_Decimal, "-#0", "-1", max_dport, Setting_NonCoreFn, set_port, get_port, is_setting_available, { .reboot_required = On } },
-    { Setting_THC_CutterUpPort, Group_AuxPorts, "Cutter up port", NULL, Format_Decimal, "-#0", "-1", max_dport, Setting_NonCoreFn, set_port, get_port, is_setting_available, { .reboot_required = On } },
+    { Setting_Arc_VoltagePort, Group_AuxPorts, "Arc voltage port", NULL, Format_Decimal, "-#0", "-1", a_in.port_maxs, Setting_NonCoreFn, set_port, get_port, is_setting_available, { .reboot_required = On } },
+    { Setting_Arc_OkPort, Group_AuxPorts, "Arc ok port", NULL, Format_Decimal, "-#0", "-1", d_in.port_maxs, Setting_NonCoreFn, set_port, get_port, NULL, { .reboot_required = On } },
+    { Setting_THC_CutterDownPort, Group_AuxPorts, "Cutter down port", NULL, Format_Decimal, "-#0", "-1", d_in.port_maxs, Setting_NonCoreFn, set_port, get_port, is_setting_available, { .reboot_required = On } },
+    { Setting_THC_CutterUpPort, Group_AuxPorts, "Cutter up port", NULL, Format_Decimal, "-#0", "-1", d_in.port_maxs, Setting_NonCoreFn, set_port, get_port, is_setting_available, { .reboot_required = On } },
     { Setting_THC_Options, Group_Plasma, "Plasma options", NULL, Format_Bitfield, "Virtual ports,Sync Z position", NULL, NULL, Setting_NonCore, &plasma.option.flags, NULL, NULL, { .reboot_required = On } },
     { Setting_THC_FeedFactor, Group_Plasma, "Plasma Z feed factor", "percent", Format_Int8, "##0", "1", "100", Setting_NonCore, &plasma.feed_factor, NULL, is_setting_available },
 };
@@ -1352,32 +1386,43 @@ static void plasma_settings_save (void)
 
 static void plasma_settings_restore (void)
 {
-    plasma.mode = mode;
-    plasma.option.flags = 0;
-    plasma.thc_delay = 3.0f;
-    plasma.thc_threshold = 1.0f;
-    plasma.thc_override = 100;
-    plasma.vad_threshold = 90;
-    plasma.pause_at_end = 0.0f;
-    plasma.pierce_delay = 0.0f;
-    plasma.pierce_height = 1.0f;
-    plasma.arc_fail_timeout = 3.0f;
-    plasma.arc_retries = 3;
-    plasma.arc_retry_delay = 3.0f;
-    plasma.arc_fail_timeout = 3.0f;
-    plasma.arc_voltage_scale = 1.0f;
-    plasma.arc_voltage_offset = 0.0f;
-    plasma.arc_height_per_volt = 0.1f;
-    plasma.arc_ok_high_voltage = 150.0;
-    plasma.arc_ok_low_voltage = 100.0f;
-    plasma.feed_factor = 10;
-    plasma.pid.p_gain = 1.0f;
-    plasma.pid.i_gain = 0.0f;
-    plasma.pid.d_gain = 0.0f;
-    plasma.port_arc_voltage = ioport_find_free(Port_Analog, Port_Input, (pin_cap_t){ .claimable = On }, "Arc voltage");
-    plasma.port_arc_ok = ioport_find_free(Port_Digital, Port_Input, (pin_cap_t){ .claimable = On }, "Arc ok");
-    plasma.port_cutter_down = updown_enabled && plasma.port_arc_ok >= 1 ? plasma.port_arc_ok - 1 : 255;
-    plasma.port_cutter_up = updown_enabled && plasma.port_arc_ok >= 2 ? plasma.port_arc_ok - 2 : 255;
+    static const plasma_settings_t default_settings = {
+        .option.flags = 0,
+        .thc_delay = 3.0f,
+        .thc_threshold = 1.0f,
+        .thc_override = 100,
+        .vad_threshold = 90,
+        .pause_at_end = 0.0f,
+        .pierce_delay = 0.0f,
+        .pierce_height = 1.0f,
+        .arc_fail_timeout = 3.0f,
+        .arc_retries = 3,
+        .arc_retry_delay = 3.0f,
+        .arc_fail_timeout = 3.0f,
+        .arc_voltage_scale = 1.0f,
+        .arc_voltage_offset = 0.0f,
+        .arc_height_per_volt = 0.1f,
+        .arc_ok_high_voltage = 150.0,
+        .arc_ok_low_voltage = 100.0f,
+        .feed_factor = 10,
+        .pid.p_gain = 1.0f,
+        .pid.i_gain = 0.0f,
+        .pid.d_gain = 0.0f,
+        .port_arc_ok = IOPORT_UNASSIGNED,
+        .port_arc_voltage = IOPORT_UNASSIGNED,
+        .port_cutter_down = IOPORT_UNASSIGNED,
+        .port_cutter_up = IOPORT_UNASSIGNED
+    };
+
+    memcpy(&plasma, &default_settings, sizeof(plasma_settings_t));
+
+    if((plasma.port_arc_ok = d_in.get_next(&d_in, IOPORT_UNASSIGNED, "Arc ok", (pin_cap_t){})) != IOPORT_UNASSIGNED && updown_enabled) {
+        plasma.port_cutter_down = d_in.get_next(&d_in, plasma.port_arc_ok, "Cutter down", (pin_cap_t){});
+        plasma.port_cutter_up = d_in.get_next(&d_in, plasma.port_cutter_down, "Cutter up", (pin_cap_t){});
+    }
+
+    if((plasma.mode = mode) == Plasma_ModeVoltage)
+        plasma.port_arc_voltage = a_in.get_next(&a_in, IOPORT_UNASSIGNED, "Arc voltage", (pin_cap_t){});
 
     hal.nvs.memcpy_to_nvs(nvs_address, (uint8_t *)&plasma, sizeof(plasma_settings_t), true);
 }
@@ -1387,9 +1432,9 @@ static bool plasma_claim_digital_in (xbar_t *target, uint8_t port, const char *d
     xbar_t *p;
     bool ok = false;
 
-    if(port != 255 && (p = ioport_get_info(Port_Digital, Port_Input, port)) && p->get_value && !p->mode.claimed) {
+    if((ok = !!(p = d_in.claim(&d_in, &port, description, (pin_cap_t){})) && p->get_value)) {
         memcpy(target, p, sizeof(xbar_t));
-        if((ok = ioport_claim(Port_Digital, Port_Input, &port, description)) && target == &arc_ok)
+        if(target == &arc_ok)
             port_arc_ok = port;
     }
 
@@ -1399,7 +1444,7 @@ static bool plasma_claim_digital_in (xbar_t *target, uint8_t port, const char *d
 static void plasma_settings_load (void)
 {
     if(hal.nvs.memcpy_from_nvs((uint8_t *)&plasma, nvs_address, sizeof(plasma_settings_t), true) != NVS_TransferResult_OK) {
-        plasma.port_arc_ok = plasma.port_cutter_down = plasma.port_cutter_up = 255;
+        plasma.port_arc_ok = plasma.port_cutter_down = plasma.port_cutter_up = IOPORT_UNASSIGNED;
         plasma_settings_restore();
     }
 
@@ -1408,14 +1453,14 @@ static void plasma_settings_load (void)
 
     if(!(init_ok = mode != Plasma_ModeVoltage)) {
 
-        if(plasma.port_arc_voltage != 255) {
+        uint8_t port;
+
+        if((port = plasma.port_arc_voltage) != IOPORT_UNASSIGNED) {
 
             xbar_t *p;
 
-            if((p = ioport_get_info(Port_Analog, Port_Input, port_arc_voltage)) && p->get_value && !p->mode.claimed) {
+            if((init_ok = !!(p = a_in.claim(&a_in, &port, "Arc voltage", (pin_cap_t){})) && p->get_value))
                 memcpy(&parc_voltage, p, sizeof(xbar_t));
-                init_ok = ioport_claim(Port_Analog, Port_Input, &port_arc_voltage, "Arc voltage");
-            }
         }
 
         if(!init_ok) {
@@ -1455,6 +1500,8 @@ static void plasma_settings_load (void)
 
 static void on_settings_changed (settings_t *settings, settings_changed_flags_t changed)
 {
+//    plasma.pid.max_error = plasma.thc_threshold + 0.1f;
+
     pidf_init(&pid, &plasma.pid);
 }
 
@@ -1517,22 +1564,17 @@ void plasma_init (void)
 
     bool ok;
 
-    if((ok = !!hal.stepper.output_step && ioport_can_claim_explicit())) {
-        n_ain = ioports_available(Port_Analog, Port_Input);
-        n_din = ioports_available(Port_Digital, Port_Input);
-        ok = (n_ain >= 1 && n_din >= 1) || (n_din >= 3);
+    if((ok = !!hal.stepper.output_step && ioports_cfg(&d_in, Port_Digital, Port_Input)->n_ports)) {
+        ioports_cfg(&a_in, Port_Analog, Port_Input);
+        ok = (a_in.n_ports >= 1 && d_in.n_ports >= 1) || (d_in.n_ports >= 3);
     }
 
     if(ok) {
-        updown_enabled = n_ain == 0;
+        updown_enabled = a_in.n_ports == 0;
         ok = (nvs_address = nvs_alloc(sizeof(plasma_settings_t)));
     }
 
     if(ok && (z_motor = st2_motor_init(Z_AXIS, false)) != NULL) {
-
-        if(n_ain)
-            strcpy(max_aport, uitoa(n_ain - 1));
-        strcpy(max_dport, uitoa(n_din - 1));
 
         settings_register(&setting_details);
         system_register_commands(&thc_commands);
@@ -1554,10 +1596,10 @@ void plasma_init (void)
         hal.control_interrupt_callback = trap_control_interrupts;
 */
 
-        if(n_ain == 0)
+        if(a_in.n_ports == 0)
             setting_remove_elements(Setting_THC_Mode, 0b1101);
 
-        if(n_din < 3)
+        if(d_in.n_ports < 3)
             setting_remove_elements(Setting_THC_Mode, 0b1011);
 
         // Load materials
