@@ -4,7 +4,7 @@
 
   Part of grblHAL
 
-  Copyright (c) 2020-2025 Terje Io
+  Copyright (c) 2020-2026 Terje Io
 
   grblHAL is free software: you can redistribute it and/or modify
   it under the terms of the GNU General Public License as published by
@@ -1597,10 +1597,10 @@ void plasma_init (void)
 */
 
         if(a_in.n_ports == 0)
-            setting_remove_elements(Setting_THC_Mode, 0b1101);
+            setting_remove_elements(Setting_THC_Mode, 0b1101, true);
 
         if(d_in.n_ports < 3)
-            setting_remove_elements(Setting_THC_Mode, 0b1011);
+            setting_remove_elements(Setting_THC_Mode, 0b1011, true);
 
         // Load materials
         sheetcam_init();
