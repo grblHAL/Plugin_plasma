@@ -181,7 +181,7 @@ static uint32_t material_id = PLASMA_TMP_MATERIAL_ID_START;
 static material_t *materials = NULL, tmp_material = { .id = -1 };
 static plasma_job_t job = {};
 
-static settings_changed_ptr settings_changed;
+static settings_changed_ptr on_settings_changed;
 static driver_reset_ptr driver_reset = NULL;
 static spindle_set_state_ptr spindle_set_state_ = NULL;
 //static control_signals_callback_ptr control_interrupt_callback = NULL;
@@ -1206,7 +1206,7 @@ static void onSpindleSelected (spindle_ptrs_t *spindle)
 
 static void plasma_setup (settings_t *settings, settings_changed_flags_t changed)
 {
-    settings_changed(settings, changed);
+    on_settings_changed(settings, changed);
 
     if(!driver_reset) {
 
@@ -1486,8 +1486,8 @@ static void plasma_settings_load (void)
         if(plasma.feed_factor == 0 || plasma.feed_factor > 100)
             plasma.feed_factor = 5;
 
-        settings_changed = hal.settings_changed;
-        hal.settings_changed = plasma_setup;
+        on_settings_changed = grbl.on_settings_changed;
+        grbl.on_settings_changed = plasma_setup;
 
         if(plasma.mode != mode)
             task_run_on_startup(report_warning, "Plasma mode changed due to lack of inputs!");
