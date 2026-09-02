@@ -1498,7 +1498,7 @@ static void plasma_settings_load (void)
         task_run_on_startup(report_warning, "Plasma mode failed to initialize!");
 }
 
-static void on_settings_changed (settings_t *settings, settings_changed_flags_t changed)
+static void plasma_settings_changed (settings_t *settings, settings_changed_flags_t changed)
 {
 //    plasma.pid.max_error = plasma.thc_threshold + 0.1f;
 
@@ -1550,7 +1550,7 @@ void plasma_init (void)
         .save = plasma_settings_save,
         .load = plasma_settings_load,
         .restore = plasma_settings_restore,
-        .on_changed = on_settings_changed
+        .on_changed = plasma_settings_changed
     };
 
     static const sys_command_t thc_command_list[] = {
