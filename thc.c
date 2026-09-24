@@ -826,7 +826,11 @@ static void state_await_puddle_clear (void)
 {
     if(!st2_motor_running(z_motor)) {
         task_add_delayed(thc_start, NULL, (uint32_t)ceilf(1000.0f * plasma.thc_delay));
-        if(plasma.option.sync_pos) {
+        if((plasma.option.sync_pos
+#if STEP_INJECT_STREAM
+            || hal.stepper.injection != NULL
+#endif
+           ) && !sys.position_lost) {
             int32_t step_count;
             if((step_count = (int32_t)st2_get_position(z_motor))) {
                 sys.position[Z_AXIS] += step_count;
@@ -867,9 +871,12 @@ static void state_await_idle (void)
     else if(state_get() == STATE_IDLE) {
 
         stateHandler = state_idle;
-        hal.stepper.claim_motor(Z_AXIS, false);
 
-        if(plasma.option.sync_pos) {
+        if((plasma.option.sync_pos
+#if STEP_INJECT_STREAM
+            || hal.stepper.injection != NULL
+#endif
+           ) && !sys.position_lost) {
 
             int32_t step_count;
             if((step_count = (int32_t)st2_get_position(z_motor))) {
@@ -878,6 +885,8 @@ static void state_await_idle (void)
                 sync_position();
             }
         }
+        // Hand the axis back only after its confirmed offset is synchronized.
+        hal.stepper.claim_motor(Z_AXIS, false);
     }
 }
 
