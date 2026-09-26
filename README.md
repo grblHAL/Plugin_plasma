@@ -113,3 +113,7 @@ LinuxCNC documentation linked to above.
 
 ---
 2025-08-31
+
+### Stream injection integration
+
+See [confirmed Z position and axis handover](doc/stream-injection.md).
